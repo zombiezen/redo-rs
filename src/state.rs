@@ -30,7 +30,7 @@ fn connect<P: AsRef<Path>>(env: &Env, dbfile: P) -> rusqlite::Result<Connection>
   Ok(db)
 }
 
-pub(crate) fn init<T: AsRef<str>>(targets: &[T]) -> (Env, bool) {
+pub(crate) fn init<T: AsRef<str>>(targets: &[T]) -> Result<(Env, bool), Error> {
   env::init(targets)
 }
 

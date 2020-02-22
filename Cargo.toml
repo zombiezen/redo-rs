@@ -5,6 +5,7 @@ authors = ["Ross Light <ross@zombiezen.com>"]
 edition = "2018"
 
 [dependencies]
+common-path = "1.0.0"
 failure = "0.1.6"
 libc = "0.2.67"
 nix = "0.17.0"

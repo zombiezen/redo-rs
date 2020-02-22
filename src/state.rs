@@ -1,22 +1,127 @@
-use failure::Error;
+use failure::{Error, format_err, ResultExt};
 use libc::{self, c_int, c_short, flock, off_t};
 use nix;
 use nix::errno::Errno;
 use nix::fcntl::{self, FcntlArg};
 use nix::sys::wait::{self, WaitStatus};
 use nix::unistd::{self, ForkResult};
-use rusqlite::{self, Connection, NO_PARAMS};
+use rusqlite::{self, Connection, NO_PARAMS, OptionalExtension, params};
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
+use std::io;
 use std::mem;
 use std::process;
 use std::os::unix::io::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::env::{self, Env};
 use super::helpers;
+
+const SCHEMA_VER: i32 = 2;
+
+const ALWAYS: &str = "//ALWAYS";
+
+#[derive(Debug)]
+#[non_exhaustive]
+pub(crate) struct ProcessState {
+  db: Connection,
+  lock_manager: LockManager,
+  env: Env,
+  is_toplevel: bool,
+}
+
+impl ProcessState {
+  pub(crate) fn init<T: AsRef<str>>(targets: &[T]) -> Result<ProcessState, Error> {
+    let (mut e, is_toplevel) = env::init(targets)?;
+    let dbdir = {
+      let mut dbdir = PathBuf::from(&e.base);
+      dbdir.push(".redo");
+      dbdir
+    };
+    if let Err(err) = fs::create_dir(&dbdir) {
+      if err.kind() != io::ErrorKind::AlreadyExists {
+        return Err(Error::from(err).context("Could not create database directory").into());
+      }
+    }
+    let lockfile = {
+      let mut lockfile = PathBuf::from(&dbdir);
+      lockfile.push("locks");
+      lockfile
+    };
+    let lock_manager = LockManager::open(lockfile)?;
+    if is_toplevel && lock_manager.detect_broken_locks()? {
+      e.mark_locks_broken();
+    }
+    let dbfile = {
+      let mut dbfile = PathBuf::from(&dbdir);
+      dbfile.push("db.sqlite3");
+      dbfile
+    };
+    let must_create = !dbfile.exists();
+    let mut db: Connection;
+    {
+      let tx = if !must_create {
+        db = connect(&e, &dbfile).with_context(|e| format!("could not connect: {}", e))?;
+        let tx = db.transaction()?;
+        let ver: Option<i32> = tx.query_row("select version from Schema", NO_PARAMS, |row| row.get(0)).optional().context("schema version check failed")?;
+        if ver != Some(SCHEMA_VER) {
+          return Err(format_err!("{}: found v{} (expected v{})\nmanually delete .redo dir to start over.", dbfile.to_string_lossy(), ver.unwrap_or(0), SCHEMA_VER));
+        }
+        tx
+      } else {
+        helpers::unlink(&dbfile)?;
+        db = connect(&e, &dbfile).with_context(|e| format!("could not connect: {}", e))?;
+        let tx = db.transaction()?;
+        tx.execute("create table Schema \
+                        (version int)", NO_PARAMS).context("create table Schema")?;
+        tx.execute("create table Runid \
+                        (id integer primary key autoincrement)", NO_PARAMS).context("create table Runid")?;
+        tx.execute("create table Files \
+                        (name not null primary key, \
+                        is_generated int, \
+                        is_override int, \
+                        checked_runid int, \
+                        changed_runid int, \
+                        failed_runid int, \
+                        stamp,
+                        csum)", NO_PARAMS).context("create table Files")?;
+        tx.execute("create table Deps \
+                        (target int, \
+                        source int, \
+                        mode not null, \
+                        delete_me int, \
+                        primary key (target, source))", NO_PARAMS).context("create table Deps")?;
+        tx.execute("insert into Schema (version) values (?)", params![SCHEMA_VER]).context("create table Schema")?;
+        // eat the '0' runid and File id.
+        // Because of the cheesy way t/flush-cache is implemented, leave a
+        // lot of runids available before the "first" one so that we
+        // can adjust cached values to be before the first value.
+        tx.execute("insert into Runid values (1000000000)", NO_PARAMS).context("insert initial Runid")?;
+        tx.execute("insert into Files (name) values (?)", params![ALWAYS]).context("insert ALWAYS file")?;
+        tx
+      };
+
+      if e.runid.is_none() {
+        tx.execute("insert into Runid values \
+                        ((select max(id)+1 from Runid))", NO_PARAMS).context("insert into Runid")?;
+        e.fill_runid(tx.query_row("select last_insert_rowid()", NO_PARAMS, |row| row.get(0)).context("read runid")?);
+      }
+
+      tx.commit().context("Commit database setup")?;
+    }
+
+    Ok(ProcessState{
+      db,
+      lock_manager,
+      env: e,
+      is_toplevel,
+    })
+  }
+
+  pub(crate) fn env(&self) -> &Env { &self.env }
+}
 
 fn connect<P: AsRef<Path>>(env: &Env, dbfile: P) -> rusqlite::Result<Connection> {
   let db = Connection::open(dbfile)?;
@@ -26,12 +131,8 @@ fn connect<P: AsRef<Path>>(env: &Env, dbfile: P) -> rusqlite::Result<Connection>
   // mode PERSIST.  But WAL fails on Windows WSL due to WSL's totally broken
   // locking.  On WSL, at least PERSIST works in single-threaded mode, so
   // if we're careful we can use it, more or less.
-  db.execute(if env.locks_broken { "pragma journal_mode = PERSIST"} else {  "pragma journal_mode = WAL" }, NO_PARAMS)?;
+  db.query_row(if env.locks_broken { "pragma journal_mode = PERSIST"} else {  "pragma journal_mode = WAL" }, NO_PARAMS, |_| Ok(()))?;
   Ok(db)
-}
-
-pub(crate) fn init<T: AsRef<str>>(targets: &[T]) -> Result<(Env, bool), Error> {
-  env::init(targets)
 }
 
 #[derive(Debug)]

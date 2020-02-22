@@ -30,7 +30,7 @@ pub(crate) struct Env {
   pub(crate) pretty: i32,
   pub(crate) shuffle: bool,
   pub(crate) startdir: PathBuf,
-  pub(crate) runid: Option<i32>,
+  pub(crate) runid: Option<i64>,
   pub(crate) unlocked: bool,
   pub(crate) no_oob: bool,
 }
@@ -46,17 +46,17 @@ impl Env {
       pwd: env::var_os("REDO_PWD").unwrap_or_default().into(),
       target: env::var_os("REDO_TARGET").unwrap_or_default().into(),
       depth: env::var_os("REDO_DEPTH").unwrap_or_default(),
-      debug: get_int("REDO_DEBUG", 0),
+      debug: get_int("REDO_DEBUG", 0) as i32,
       debug_locks: get_bool("REDO_DEBUG_LOCKS"),
       debug_pids: get_bool("REDO_DEBUG_PIDS"),
       locks_broken: get_bool("REDO_LOCKS_BROKEN"),
-      verbose: get_int("REDO_VERBOSE", 0),
-      xtrace: get_int("REDO_XTRACE", 0),
+      verbose: get_int("REDO_VERBOSE", 0) as i32,
+      xtrace: get_int("REDO_XTRACE", 0) as i32,
       keep_going: get_bool("REDO_KEEP_GOING"),
-      log: get_int("REDO_LOG", 1),
+      log: get_int("REDO_LOG", 1) as i32,
       log_inode: env::var_os("REDO_LOG_INODE").unwrap_or_default(),
-      color: get_int("REDO_COLOR", 0),
-      pretty: get_int("REDO_PRETTY", 0),
+      color: get_int("REDO_COLOR", 0) as i32,
+      pretty: get_int("REDO_PRETTY", 0) as i32,
       shuffle: get_bool("REDO_SHUFFLE"),
       startdir: env::var_os("REDO_STARTDIR").unwrap_or_default().into(),
       runid: match get_int("REDO_RUNID", 0) {
@@ -81,6 +81,12 @@ impl Env {
 
     self.locks_broken = true;
     self.log = 0;
+  }
+
+  pub(crate) fn fill_runid(&mut self, runid: i64) {
+    assert!(self.runid.is_none());
+    self.runid = Some(runid);
+    env::set_var("REDO_RUNID", runid.to_string());
   }
 }
 
@@ -167,8 +173,8 @@ pub(crate) fn init<T: AsRef<str>>(targets: &[T]) -> Result<(Env, bool), Error> {
   Ok((Env::inherit()?, is_toplevel))
 }
 
-fn get_int<K: AsRef<OsStr>>(key: K, default: i32) -> i32 {
-  env::var(key).ok().and_then(|v| i32::from_str(&v).ok()).unwrap_or(default)
+fn get_int<K: AsRef<OsStr>>(key: K, default: i64) -> i64 {
+  env::var(key).ok().and_then(|v| i64::from_str(&v).ok()).unwrap_or(default)
 }
 
 fn get_bool<K: AsRef<OsStr>>(key: K) -> bool {

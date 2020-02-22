@@ -1,0 +1,11 @@
+[package]
+name = "redo-rs"
+version = "0.1.0"
+authors = ["Ross Light <ross@zombiezen.com>"]
+edition = "2018"
+
+[dependencies]
+failure = "0.1.6"
+libc = "0.2.67"
+nix = "0.17.0"
+rusqlite = "0.21.0"

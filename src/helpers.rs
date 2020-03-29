@@ -1,7 +1,7 @@
-use nix::{self, NixPath};
 use nix::errno::Errno;
 use nix::fcntl::{self, FcntlArg, FdFlag};
 use nix::unistd;
+use nix::{self, NixPath};
 use std::borrow::Cow;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
@@ -26,7 +26,10 @@ pub(crate) fn unlink<P: ?Sized + NixPath>(f: &P) -> nix::Result<()> {
   }
 }
 
-pub(crate) fn abs_path<'p, 'q, P: AsRef<Path>, Q: AsRef<Path>>(cwd: &'p P, path: &'q Q) -> Cow<'q, Path> {
+pub(crate) fn abs_path<'p, 'q, P: AsRef<Path>, Q: AsRef<Path>>(
+    cwd: &'p P,
+    path: &'q Q,
+) -> Cow<'q, Path> {
   let path = path.as_ref();
   if path.is_absolute() {
     Cow::Borrowed(path)

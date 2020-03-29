@@ -7,15 +7,18 @@ mod state;
 
 fn main() {
     match run() {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             let name: String = match std::env::current_exe() {
-                Ok(exe) => exe.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| String::from("redo")),
+                Ok(exe) => exe
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| String::from("redo")),
                 Err(_) => String::from("redo"),
             };
             eprintln!("{}: {}", name, e);
             process::exit(1);
-        },
+        }
     }
 }
 

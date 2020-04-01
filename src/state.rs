@@ -1,14 +1,20 @@
 use failure::{format_err, Error, ResultExt};
 use libc::{self, c_int, c_short, flock, off_t};
+use libsqlite3_sys;
 use nix;
 use nix::errno::Errno;
 use nix::fcntl::{self, FcntlArg};
 use nix::sys::wait::{self, WaitStatus};
 use nix::unistd::{self, ForkResult};
-use rusqlite::{self, params, Connection, OptionalExtension, NO_PARAMS};
+use rusqlite::{
+    self, params, Connection, DropBehavior, OptionalExtension, Row, ToSql, TransactionBehavior,
+    NO_PARAMS,
+};
+use std::borrow::Cow;
 use std::cell::RefCell;
+use std::cmp;
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::mem;
 use std::os::unix::io::AsRawFd;
@@ -30,6 +36,13 @@ pub(crate) struct ProcessState {
     lock_manager: LockManager,
     env: Env,
     is_toplevel: bool,
+    wrote: i32,
+}
+
+#[derive(Debug)]
+pub(crate) struct ProcessTransaction<'a> {
+    state: &'a mut ProcessState,
+    drop_behavior: DropBehavior,
 }
 
 impl ProcessState {
@@ -156,11 +169,85 @@ impl ProcessState {
             lock_manager,
             env: e,
             is_toplevel,
+            wrote: 0,
         })
     }
 
+    #[inline]
     pub(crate) fn env(&self) -> &Env {
         &self.env
+    }
+
+    fn write<P>(&mut self, sql: &str, params: P) -> rusqlite::Result<usize>
+    where
+        P: IntoIterator,
+        P::Item: ToSql,
+    {
+        self.wrote += 1;
+        self.db.execute(sql, params)
+    }
+}
+
+impl<'a> ProcessTransaction<'a> {
+    pub(crate) fn new(
+        state: &'a mut ProcessState,
+        behavior: TransactionBehavior,
+    ) -> rusqlite::Result<ProcessTransaction> {
+        let query = match behavior {
+            TransactionBehavior::Deferred => "BEGIN DEFERRED",
+            TransactionBehavior::Immediate => "BEGIN IMMEDIATE",
+            TransactionBehavior::Exclusive => "BEGIN EXCLUSIVE",
+        };
+        state
+            .db
+            .execute_batch(query)
+            .map(move |_| ProcessTransaction {
+                state,
+                drop_behavior: DropBehavior::Rollback,
+            })
+    }
+
+    #[inline]
+    pub(crate) fn set_drop_behavior(&mut self, drop_behavior: DropBehavior) {
+        self.drop_behavior = drop_behavior;
+    }
+
+    #[inline]
+    pub(crate) fn finish(mut self) -> rusqlite::Result<()> {
+        self.finish_()
+    }
+
+    #[inline]
+    pub(crate) fn commit(mut self) -> rusqlite::Result<()> {
+        self.drop_behavior = DropBehavior::Commit;
+        self.finish()
+    }
+
+    #[inline]
+    pub(crate) fn state(&self) -> &ProcessState {
+        self.state
+    }
+
+    fn finish_(&mut self) -> rusqlite::Result<()> {
+        match self.drop_behavior {
+            DropBehavior::Ignore => Ok(()),
+            DropBehavior::Commit => match self.state.db.execute_batch("COMMIT") {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    let _ = self.state.db.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            },
+            DropBehavior::Rollback => self.state.db.execute_batch("ROLLBACK"),
+            DropBehavior::Panic => panic!("ProcessTransaction dropped"),
+        }
+    }
+}
+
+impl<'a> Drop for ProcessTransaction<'a> {
+    #[inline]
+    fn drop(&mut self) {
+        let _ = self.finish_();
     }
 }
 
@@ -184,9 +271,132 @@ fn connect<P: AsRef<Path>>(env: &Env, dbfile: P) -> rusqlite::Result<Connection>
     Ok(db)
 }
 
+/// An object representing a source or target in the redo database.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub(crate) struct File {
+    pub(crate) id: i64,
+    pub(crate) name: String,
+    pub(crate) is_generated: bool,
+    pub(crate) is_override: bool,
+    pub(crate) checked_runid: Option<i64>,
+    pub(crate) changed_runid: Option<i64>,
+    pub(crate) failed_runid: Option<i64>,
+    pub(crate) stamp: Option<String>,
+    pub(crate) csum: Option<String>,
+}
+
+const FILE_QUERY_PREFIX: &str = "select rowid, \
+                              name, \
+                              is_generated, \
+                              is_override, \
+                              checked_runid, \
+                              changed_runid, \
+                              failed_runid, \
+                              stamp, \
+                              csum \
+                              from Files ";
+
+impl File {
+    pub(crate) fn from_name(
+        ptx: &mut ProcessTransaction,
+        name: &str,
+        allow_add: bool,
+    ) -> Result<File, Error> {
+        let mut q = String::from(FILE_QUERY_PREFIX);
+        q.push_str("where name=?");
+        let normalized_name: Cow<str> = if name == ALWAYS {
+            Cow::Borrowed(&ALWAYS)
+        } else {
+            Cow::Owned(
+                relpath(name, &ptx.state.env.base)?
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        };
+        match ptx
+            .state
+            .db
+            .query_row(q.as_str(), params!(&normalized_name), |row| {
+                File::from_cols(&ptx.state.env, row)
+            }) {
+            Ok(f) => Ok(f),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                if !allow_add {
+                    return Err(format_err!("no file with name={:?}", normalized_name));
+                }
+                match ptx.state.write(
+                    "insert into Files (name) values (?)",
+                    params!(normalized_name),
+                ) {
+                    Ok(_) => {}
+                    Err(rusqlite::Error::SqliteFailure(
+                        libsqlite3_sys::Error {
+                            code: libsqlite3_sys::ErrorCode::ConstraintViolation,
+                            ..
+                        },
+                        _,
+                    )) => {
+                        // Some parallel redo probably added it at the same time; no
+                        // big deal.
+                    }
+                    Err(e) => {
+                        return Err(e.into());
+                    }
+                }
+                Ok(ptx
+                    .state
+                    .db
+                    .query_row(q.as_str(), params!(&normalized_name), |row| {
+                        File::from_cols(&ptx.state.env, row)
+                    })?)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub(crate) fn from_cols(env: &Env, row: &Row) -> rusqlite::Result<File> {
+        let mut f = File {
+            id: row.get("rowid")?,
+            name: row.get("name")?,
+            is_generated: row
+                .get::<&str, Option<bool>>("is_generated")?
+                .unwrap_or(false),
+            is_override: row
+                .get::<&str, Option<bool>>("is_override")?
+                .unwrap_or(false),
+            checked_runid: row.get("checked_runid")?,
+            changed_runid: row.get("changed_runid")?,
+            failed_runid: row.get("failed_runid")?,
+            stamp: row.get("stamp")?,
+            csum: row.get("csum")?,
+        };
+        if f.name == ALWAYS {
+            if let Some(env_runid) = env.runid {
+                f.changed_runid = Some(
+                    f.changed_runid
+                        .map(|changed_runid| cmp::max(env_runid, changed_runid))
+                        .unwrap_or(env_runid),
+                );
+            }
+        }
+        Ok(f)
+    }
+
+    fn set_checked(&mut self, v: &Env) {
+        self.checked_runid = v.runid;
+    }
+
+    pub(crate) fn nice_name(&self, v: &Env) -> Result<String, Error> {
+        Ok(relpath(v.base.join(&self.name), &v.startdir)?
+            .to_string_lossy()
+            .into_owned())
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct LockManager {
-    file: File,
+    file: fs::File,
     locks: RefCell<HashSet<i32>>,
 }
 
@@ -349,5 +559,64 @@ fn fid_flock(typ: c_int, fid: i32) -> flock {
         l_start: fid as off_t,
         l_len: 1,
         l_pid: 0,
+    }
+}
+
+/// Given a relative or absolute path `t`, express it relative to `base`.
+fn relpath<P1: AsRef<Path>, P2: AsRef<Path>>(t: P1, base: P2) -> io::Result<PathBuf> {
+    let t = t.as_ref();
+    // TODO(maybe): Memoize cwd
+    let cwd = std::env::current_dir()?;
+    let t = cwd.join(t);
+    let t = realdirpath(&t)?;
+    let t = helpers::normpath(&t);
+
+    let base = base.as_ref();
+    let base = realdirpath(&base)?;
+    let base = helpers::normpath(&base);
+
+    let mut n = 0usize;
+    for (tp, bp) in t.components().zip(base.components()) {
+        if tp != bp {
+            break;
+        }
+        n += 1;
+    }
+    let mut buf = PathBuf::new();
+    for _ in base.components().skip(n) {
+        buf.push("..");
+    }
+    for part in t.components().skip(n) {
+        buf.push(part);
+    }
+    Ok(buf)
+}
+
+/**
+ * Like `Path::canonicalize()`, but don't follow symlinks for the last element.
+ *
+ * redo needs this because targets can be symlinks themselves, and we want
+ * to talk about the symlink, not what it points at.  However, all the path
+ * elements along the way could result in pathname aliases for a *particular*
+ * target, so we want to resolve it to one unique name.
+ */
+fn realdirpath<'a, P>(t: &'a P) -> io::Result<Cow<'a, Path>>
+where
+    P: AsRef<Path> + ?Sized,
+{
+    let t = t.as_ref();
+    match t.parent() {
+        None => Ok(Cow::Borrowed(t)),
+        Some(dname) => match t.file_name() {
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid file name",
+            )),
+            Some(fname) => {
+                let mut buf = dname.canonicalize()?;
+                buf.push(fname);
+                Ok(Cow::Owned(buf))
+            }
+        },
     }
 }

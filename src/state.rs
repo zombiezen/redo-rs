@@ -20,6 +20,7 @@ use std::mem;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::rc::Rc;
 use std::time::Duration;
 
 use super::env::{self, Env};
@@ -33,7 +34,7 @@ const ALWAYS: &str = "//ALWAYS";
 #[non_exhaustive]
 pub(crate) struct ProcessState {
     db: Connection,
-    lock_manager: LockManager,
+    lock_manager: Rc<LockManager>,
     env: Env,
     is_toplevel: bool,
     wrote: i32,
@@ -65,8 +66,8 @@ impl ProcessState {
             lockfile.push("locks");
             lockfile
         };
-        let lock_manager = LockManager::open(lockfile)?;
-        if is_toplevel && lock_manager.detect_broken_locks()? {
+        let lock_manager = Rc::new(LockManager::open(lockfile)?);
+        if is_toplevel && LockManager::detect_broken_locks(&lock_manager)? {
             e.mark_locks_broken();
         }
         let dbfile = {
@@ -178,6 +179,21 @@ impl ProcessState {
         &self.env
     }
 
+    #[inline]
+    pub(crate) fn new_lock(&self, fid: i32) -> Lock {
+        Lock::new(self.lock_manager.clone(), fid)
+    }
+
+    #[inline]
+    pub(crate) fn is_toplevel(&self) -> bool {
+        self.is_toplevel
+    }
+
+    #[inline]
+    pub(crate) fn is_flushed(&self) -> bool {
+        self.wrote == 0
+    }
+
     fn write<P>(&mut self, sql: &str, params: P) -> rusqlite::Result<usize>
     where
         P: IntoIterator,
@@ -232,13 +248,20 @@ impl<'a> ProcessTransaction<'a> {
         match self.drop_behavior {
             DropBehavior::Ignore => Ok(()),
             DropBehavior::Commit => match self.state.db.execute_batch("COMMIT") {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    self.state.wrote = 0;
+                    Ok(())
+                }
                 Err(e) => {
                     let _ = self.state.db.execute_batch("ROLLBACK");
+                    self.state.wrote = 0;
                     Err(e)
                 }
             },
-            DropBehavior::Rollback => self.state.db.execute_batch("ROLLBACK"),
+            DropBehavior::Rollback => {
+                self.state.wrote = 0;
+                self.state.db.execute_batch("ROLLBACK")
+            }
             DropBehavior::Panic => panic!("ProcessTransaction dropped"),
         }
     }
@@ -355,6 +378,14 @@ impl File {
         }
     }
 
+    pub(crate) fn from_id(ptx: &mut ProcessTransaction, id: i64) -> Result<File, Error> {
+        let mut q = String::from(FILE_QUERY_PREFIX);
+        q.push_str("where id=?");
+        Ok(ptx.state.db.query_row(q.as_str(), params!(id), |row| {
+            File::from_cols(&ptx.state.env, row)
+        })?)
+    }
+
     pub(crate) fn from_cols(env: &Env, row: &Row) -> rusqlite::Result<File> {
         let mut f = File {
             id: row.get("rowid")?,
@@ -381,6 +412,11 @@ impl File {
             }
         }
         Ok(f)
+    }
+
+    pub(crate) fn refresh(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
+        *self = File::from_id(ptx, self.id)?;
+        Ok(())
     }
 
     fn set_checked(&mut self, v: &Env) {
@@ -414,16 +450,6 @@ impl LockManager {
         })
     }
 
-    pub(crate) fn new(&self, fid: i32) -> Lock {
-        let mut locks = self.locks.borrow_mut();
-        assert!(locks.insert(fid));
-        Lock {
-            manager: self,
-            owned: false,
-            fid,
-        }
-    }
-
     /// Detect Windows WSL's completely broken `fcntl()` locks.
     ///
     /// Symptom: locking a file always returns success, even if other processes
@@ -433,8 +459,8 @@ impl LockManager {
     /// Bug exists at least in WSL "4.4.0-17134-Microsoft #471-Microsoft".
     ///
     /// Returns `true` if broken, `false` otherwise.
-    pub(crate) fn detect_broken_locks(&self) -> nix::Result<bool> {
-        let mut pl = self.new(0);
+    pub(crate) fn detect_broken_locks(manager: &Rc<LockManager>) -> nix::Result<bool> {
+        let mut pl = Lock::new(manager.clone(), 0);
         // We wait for the lock here, just in case others are doing
         // this test at the same time.
         pl.wait_lock(LockType::Exclusive)?;
@@ -448,7 +474,7 @@ impl LockManager {
                 // Doesn't actually unlock, since child process doesn't own it.
                 let _ = pl.unlock();
                 mem::drop(pl);
-                let mut cl = self.new(0);
+                let mut cl = Lock::new(manager.clone(), 0);
                 // parent is holding lock, which should prevent us from getting it.
                 match cl.try_lock() {
                     Ok(true) => {
@@ -484,16 +510,38 @@ impl Default for LockType {
 
 /// An object representing a lock on a redo target file.
 #[derive(Debug)]
-pub(crate) struct Lock<'a> {
-    manager: &'a LockManager,
+pub(crate) struct Lock {
+    manager: Rc<LockManager>,
     owned: bool,
     fid: i32,
 }
 
-impl<'a> Lock<'a> {
+impl Lock {
+    pub(crate) fn new(manager: Rc<LockManager>, fid: i32) -> Lock {
+        {
+            let mut locks = manager.locks.borrow_mut();
+            assert!(locks.insert(fid));
+        }
+        Lock {
+            manager,
+            owned: false,
+            fid,
+        }
+    }
+
     /// Check that this lock is in a sane state.
     pub(crate) fn check(&self) {
         assert!(!self.owned);
+    }
+
+    #[inline]
+    pub(crate) fn is_owned(&self) -> bool {
+        self.owned
+    }
+
+    #[inline]
+    pub(crate) fn force_owned(&mut self) {
+        self.owned = true;
     }
 
     /// Non-blocking try to acquire our lock; returns true if it worked.
@@ -542,10 +590,12 @@ impl<'a> Lock<'a> {
     }
 }
 
-impl<'a> Drop for Lock<'a> {
+impl Drop for Lock {
     fn drop(&mut self) {
-        let mut locks = self.manager.locks.borrow_mut();
-        locks.remove(&self.fid);
+        {
+            let mut locks = self.manager.locks.borrow_mut();
+            locks.remove(&self.fid);
+        }
         if self.owned {
             let _ = self.unlock();
         }

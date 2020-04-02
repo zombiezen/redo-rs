@@ -1,8 +1,10 @@
 use failure::Error;
 use rusqlite::TransactionBehavior;
+use std::io;
 use std::path::Path;
 use std::process;
 
+mod builder;
 mod env;
 mod helpers;
 mod state;
@@ -18,15 +20,27 @@ fn main() {
                     .unwrap_or_else(|| String::from("redo")),
                 Err(_) => String::from("redo"),
             };
-            eprintln!("{}: {:?}", name, e);
-            process::exit(1);
+            eprintln!("{}: {}", name, e);
+            let retcode = e
+                .downcast_ref::<builder::BuildError>()
+                .map(|be| i32::from(be.kind()))
+                .unwrap_or(1);
+            process::exit(retcode);
         }
     }
 }
 
 fn run() -> Result<(), Error> {
+    use std::os::unix::io::AsRawFd;
+
     let targets: Vec<String> = std::env::args().skip(1).collect();
     let mut ps = state::ProcessState::init(targets.as_slice())?;
+
+    if ps.is_toplevel() && ps.env().locks_broken {
+        // TODO(soon): log as warn.
+        eprintln!("detected broken fcntl locks; parallelism disabled.");
+        eprintln!("  ...details: https://github.com/Microsoft/WSL/issues/1927");
+    }
 
     {
         let mut ptx = state::ProcessTransaction::new(&mut ps, TransactionBehavior::Deferred)?;
@@ -43,5 +57,12 @@ fn run() -> Result<(), Error> {
             }
         }
     }
-    Ok(())
+
+    assert!(ps.is_flushed());
+    let build_result = builder::run(&mut ps, &targets);
+    assert!(ps.is_flushed());
+    if ps.is_toplevel() {
+        builder::await_log_reader(ps.env(), io::stderr().as_raw_fd())?;
+    }
+    build_result.map_err(|e| e.into())
 }

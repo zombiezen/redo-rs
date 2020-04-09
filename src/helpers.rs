@@ -1,21 +1,27 @@
-use nix::errno::Errno;
+use libc::{c_int, itimerval, timeval};
+use nix::errno::{self, Errno};
 use nix::fcntl::{self, FcntlArg, FdFlag};
+use nix::sys::select::FdSet;
 use nix::unistd;
 use nix::{self, NixPath};
 use std::borrow::Cow;
 use std::char;
 use std::ffi::{OsStr, OsString};
 use std::iter::FusedIterator;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::RawFd;
 use std::path::{self, Path};
+use std::time::Duration;
 
-pub(crate) fn close_on_exec<F: AsRawFd>(f: &F, yes: bool) -> nix::Result<()> {
-    let fd = f.as_raw_fd();
+pub(crate) fn close_on_exec(fd: RawFd, yes: bool) -> nix::Result<()> {
     let result = fcntl::fcntl(fd, FcntlArg::F_GETFD)?;
     let mut fl = unsafe { FdFlag::from_bits_unchecked(result) };
     fl.set(FdFlag::FD_CLOEXEC, yes);
     fcntl::fcntl(fd, fcntl::F_SETFD(fl))?;
     Ok(())
+}
+
+pub(crate) fn fd_exists(fd: RawFd) -> bool {
+    fcntl::fcntl(fd, FcntlArg::F_GETFD).is_ok()
 }
 
 /// Delete a file at path `f` if it currently exists.
@@ -43,6 +49,151 @@ where
         Cow::Owned(a)
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[allow(dead_code)]
+pub(crate) enum IntervalTimer {
+    Real,
+    Profiler,
+    Virtual,
+}
+
+impl From<IntervalTimer> for c_int {
+    fn from(which: IntervalTimer) -> c_int {
+        match which {
+            IntervalTimer::Real => libc::ITIMER_REAL,
+            IntervalTimer::Profiler => libc::ITIMER_PROF,
+            IntervalTimer::Virtual => libc::ITIMER_VIRTUAL,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct IntervalTimerValue {
+    pub(crate) interval: Duration,
+    /// Time until next expiration
+    pub(crate) value: Duration,
+}
+
+impl From<itimerval> for IntervalTimerValue {
+    #[inline]
+    fn from(val: itimerval) -> IntervalTimerValue {
+        IntervalTimerValue::from(&val)
+    }
+}
+
+impl From<&itimerval> for IntervalTimerValue {
+    #[inline]
+    fn from(val: &itimerval) -> IntervalTimerValue {
+        IntervalTimerValue {
+            interval: duration_from_timeval(&val.it_interval),
+            value: duration_from_timeval(&val.it_value),
+        }
+    }
+}
+
+impl From<IntervalTimerValue> for itimerval {
+    #[inline]
+    fn from(val: IntervalTimerValue) -> itimerval {
+        itimerval::from(&val)
+    }
+}
+
+impl From<&IntervalTimerValue> for itimerval {
+    #[inline]
+    fn from(val: &IntervalTimerValue) -> itimerval {
+        itimerval {
+            it_interval: timeval_from_duration(&val.interval),
+            it_value: timeval_from_duration(&val.value),
+        }
+    }
+}
+
+#[inline]
+pub(crate) fn duration_from_timeval(tv: &timeval) -> Duration {
+    Duration::from_secs(tv.tv_sec as u64) + Duration::from_micros(tv.tv_usec as u64)
+}
+
+#[inline]
+pub(crate) const fn timeval_from_duration(d: &Duration) -> timeval {
+    timeval {
+        tv_sec: d.as_secs() as i64,
+        tv_usec: d.subsec_micros() as i64,
+    }
+}
+
+pub(crate) fn set_interval_timer(
+    which: IntervalTimer,
+    value: &IntervalTimerValue,
+) -> nix::Result<IntervalTimerValue> {
+    let mut old_value = itimerval {
+        it_interval: timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
+        it_value: timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
+    };
+    let ret = {
+        let new_value = itimerval::from(value);
+        unsafe { setitimer(which.into(), &new_value, &mut old_value) }
+    };
+    if ret == 0 {
+        Ok((&old_value).into())
+    } else {
+        let e = Errno::from_i32(errno::errno());
+        Err(e.into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn setitimer(which: c_int, new_value: *const itimerval, old_value: *mut itimerval) -> c_int;
+}
+
+// TODO(soon): Use `fds()` method I added in https://github.com/nix-rust/nix/pull/1207
+#[derive(Clone, Debug)]
+pub(crate) struct FdSetIter {
+    set: FdSet,
+    curr: RawFd,
+}
+
+impl From<FdSet> for FdSetIter {
+    #[inline]
+    fn from(set: FdSet) -> FdSetIter {
+        FdSetIter { set, curr: 0 }
+    }
+}
+
+impl Iterator for FdSetIter {
+    type Item = RawFd;
+
+    fn next(&mut self) -> Option<RawFd> {
+        let highest = match self.set.highest() {
+            Some(highest) => highest,
+            None => return None,
+        };
+        while self.curr < highest {
+            let curr = self.curr;
+            self.curr += 1;
+            if self.set.contains(curr) {
+                return Some(curr);
+            }
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self.set.clone().highest() {
+            None => (0, Some(0)),
+            Some(highest) => (0, Some((highest - self.curr) as usize + 1)),
+        }
+    }
+}
+
+impl FusedIterator for FdSetIter {}
 
 /// Return the shortest path name equivalent to path by purely lexical
 /// processing. It applies the following rules iteratively until no further

@@ -30,6 +30,9 @@ const SCHEMA_VER: i32 = 2;
 
 const ALWAYS: &str = "//ALWAYS";
 
+/// fid offset for "log locks".
+pub(crate) const LOG_LOCK_MAGIC: i32 = 0x10000000;
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub(crate) struct ProcessState {
@@ -443,7 +446,7 @@ impl LockManager {
             .write(true)
             .create(true)
             .open(path)?;
-        helpers::close_on_exec(&file, true)?;
+        helpers::close_on_exec(file.as_raw_fd(), true)?;
         Ok(LockManager {
             file,
             locks: RefCell::new(HashSet::new()),

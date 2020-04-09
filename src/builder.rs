@@ -7,14 +7,16 @@ use std::fmt::{self, Display};
 use std::fs::File;
 use std::io;
 use std::os::unix::io::RawFd;
+use std::path::PathBuf;
 
 use super::env::Env;
-use super::state::{self, ProcessState, ProcessTransaction};
+use super::jobserver::JobServer;
+use super::state::{self, Lock, ProcessState, ProcessTransaction};
 
-fn close_stdin() -> Result<(), Error> {
+pub(crate) fn close_stdin() -> Result<(), Error> {
     use std::os::unix::io::AsRawFd;
     let f = File::open("/dev/null")?;
-    unistd::dup2(io::stdin().as_raw_fd(), 0)?;
+    unistd::dup2(f.as_raw_fd(), io::stdin().as_raw_fd())?;
     Ok(())
 }
 
@@ -46,7 +48,11 @@ impl BuildJob {
     }
 }
 
-pub(crate) fn run<S: AsRef<str>>(ps: &mut ProcessState, targets: &[S]) -> Result<(), BuildError> {
+pub(crate) fn run<S: AsRef<str>>(
+    ps: &mut ProcessState,
+    server: &mut JobServer,
+    targets: &[S],
+) -> Result<(), BuildError> {
     for t in targets {
         let t = t.as_ref();
         if t.find('\n').is_some() {
@@ -54,8 +60,43 @@ pub(crate) fn run<S: AsRef<str>>(ps: &mut ProcessState, targets: &[S]) -> Result
         }
     }
 
+    let mut me: Option<(PathBuf, state::File, Lock)> =
+        if !ps.env().target.as_os_str().is_empty() && !ps.env().unlocked {
+            let mut me = PathBuf::from(&ps.env().startdir);
+            me.push(&ps.env().pwd);
+            me.push(&ps.env().target);
+            let myfile = {
+                let mut ptx = ProcessTransaction::new(ps, TransactionBehavior::Deferred)
+                    .context(BuildErrorKind::Generic)?;
+                ptx.set_drop_behavior(DropBehavior::Commit);
+                state::File::from_name(&mut ptx, &me.to_string_lossy(), true)
+                    .context(BuildErrorKind::Generic)?
+            };
+            let selflock = ps.new_lock(state::LOG_LOCK_MAGIC + (myfile.id as i32));
+            Some((me, myfile, selflock))
+        } else {
+            None
+        };
+
     let mut result: Result<(), BuildError> = Ok(());
     let mut locked: Vec<(i64, &str)> = Vec::new();
+    let mut cheat = || -> Result<i32, Error> {
+        let selflock = match &mut me {
+            Some((_, _, ref mut selflock)) => selflock,
+            None => return Ok(0),
+        };
+        selflock.try_lock()?;
+        if !selflock.is_owned() {
+            // redo-log already owns it: let's cheat.
+            // Give ourselves one extra token so that the "foreground" log
+            // can always make progress.
+            Ok(1)
+        } else {
+            // redo-log isn't watching us (yet)
+            selflock.unlock()?;
+            Ok(0)
+        }
+    };
     // In the first cycle, we just build as much as we can without worrying
     // about any lock contention.  If someone else has it locked, we move on.
     {
@@ -71,7 +112,10 @@ pub(crate) fn run<S: AsRef<str>>(ps: &mut ProcessState, targets: &[S]) -> Result
                 continue;
             }
             seen.insert(t.into());
-            // TODO(soon): jobserver stuff.
+            // TODO(maybe): Commit state if !has_token.
+            server
+                .ensure_token_or_cheat(t, &mut cheat)
+                .context(BuildErrorKind::Generic)?;
             if result.is_err() && !ps.env().keep_going {
                 break;
             }

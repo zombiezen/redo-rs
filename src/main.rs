@@ -1,4 +1,4 @@
-use failure::Error;
+use failure::{format_err, Error};
 use rusqlite::TransactionBehavior;
 use std::io;
 use std::path::Path;
@@ -7,6 +7,7 @@ use std::process;
 mod builder;
 mod env;
 mod helpers;
+mod jobserver;
 mod state;
 
 fn main() {
@@ -33,13 +34,23 @@ fn main() {
 fn run() -> Result<(), Error> {
     use std::os::unix::io::AsRawFd;
 
-    let targets: Vec<String> = std::env::args().skip(1).collect();
+    let mut targets: Vec<String> = std::env::args().skip(1).collect();
     let mut ps = state::ProcessState::init(targets.as_slice())?;
-
-    if ps.is_toplevel() && ps.env().locks_broken {
+    if ps.is_toplevel() && targets.is_empty() {
+        targets.push(String::from("all"));
+    }
+    let mut j = 0; // TODO(soon): Parse -j flag.
+    if ps.is_toplevel() && (ps.env().log != 0 || j > 1) {
+        builder::close_stdin()?;
+    }
+    // TODO(someday): start_stdin_log_reader or logs.setup
+    if (ps.is_toplevel() || j > 1) && ps.env().locks_broken {
         // TODO(soon): log as warn.
         eprintln!("detected broken fcntl locks; parallelism disabled.");
         eprintln!("  ...details: https://github.com/Microsoft/WSL/issues/1927");
+        if j > 1 {
+            j = 1;
+        }
     }
 
     {
@@ -58,11 +69,21 @@ fn run() -> Result<(), Error> {
         }
     }
 
-    assert!(ps.is_flushed());
-    let build_result = builder::run(&mut ps, &targets);
-    assert!(ps.is_flushed());
-    if ps.is_toplevel() {
-        builder::await_log_reader(ps.env(), io::stderr().as_raw_fd())?;
+    if j < 0 || j > 1000 {
+        return Err(format_err!("invalid --jobs value: {}", j));
     }
-    build_result.map_err(|e| e.into())
+    let mut server = jobserver::JobServer::setup(1)?;
+    assert!(ps.is_flushed());
+    let build_result = builder::run(&mut ps, &mut server, &targets);
+    assert!(ps.is_flushed());
+    let return_tokens_result = server.force_return_tokens();
+    let log_reader_result = if ps.is_toplevel() {
+        builder::await_log_reader(ps.env(), io::stderr().as_raw_fd())
+    } else {
+        Ok(())
+    };
+    build_result
+        .map_err(|e| e.into())
+        .and(return_tokens_result)
+        .and(log_reader_result)
 }

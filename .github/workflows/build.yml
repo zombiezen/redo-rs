@@ -5,6 +5,10 @@ jobs:
     name: Test
     runs-on: ubuntu-18.04
     steps:
+    - name: Install sqlite3
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libsqlite3-dev
     - name: Check out code
       uses: actions/checkout@v2
     - name: Run tests

@@ -1,3 +1,11 @@
+# Rust
 /target
-.redo/
 **/*.rs.bk
+
+# Redo directory
+.redo/
+
+# Minimal do script files
+.do_built
+.do_built.dir/
+**/*.did.tmp

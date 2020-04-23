@@ -123,7 +123,7 @@ impl<'a, 'e> Iterator for DoFiles<'a, 'e> {
                     self.state = DoFilesState::Stopped;
                     None
                 }
-            }
+            },
             DoFilesState::Stopped => None,
         }
     }
@@ -140,16 +140,18 @@ impl RecursiveDoFilesState {
     fn new(norm_path: PathBuf) -> RecursiveDoFilesState {
         let norm_path = Pin::new(Box::new(norm_path));
         let dir_bits: Vec<(*const Path, *const Path)> = {
-            let dir_bits = norm_path.parent().map(|dirname| {
-                let mut bits = path_splits(dirname);
-                bits.reverse();
-                bits
-            }).unwrap_or_default();
+            let dir_bits = norm_path
+                .parent()
+                .map(|dirname| {
+                    let mut bits = path_splits(dirname);
+                    bits.reverse();
+                    bits
+                })
+                .unwrap_or_default();
             unsafe { mem::transmute(dir_bits) }
         };
-        let default_do_files = unsafe {
-            RecursiveDoFilesState::default_do_files_for(&norm_path.as_ref())
-        };
+        let default_do_files =
+            unsafe { RecursiveDoFilesState::default_do_files_for(&norm_path.as_ref()) };
         RecursiveDoFilesState {
             norm_path,
             dir_bits,
@@ -159,7 +161,12 @@ impl RecursiveDoFilesState {
 
     unsafe fn default_do_files_for(norm_path: &Pin<&PathBuf>) -> DefaultDoFiles<'static> {
         // TODO(soon): Trigger error instead of panic if file_name() is non-UTF-8.
-        mem::transmute(DefaultDoFiles::from(norm_path.file_name().and_then(|name| name.to_str()).unwrap()))
+        mem::transmute(DefaultDoFiles::from(
+            norm_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap(),
+        ))
     }
 }
 
@@ -174,7 +181,12 @@ impl Iterator for RecursiveDoFilesState {
         // into theirs as a subdir.  When they do, my rules should still be used
         // for building my project in *all* cases.
         loop {
-            let (base_dir, sub_dir) = match self.dir_bits.last().copied().map(|(base, sub)| unsafe { (&*base, &*sub) }) {
+            let (base_dir, sub_dir) = match self
+                .dir_bits
+                .last()
+                .copied()
+                .map(|(base, sub)| unsafe { (&*base, &*sub) })
+            {
                 Some(bit) => bit,
                 None => return None,
             };
@@ -189,9 +201,8 @@ impl Iterator for RecursiveDoFilesState {
                 }));
             }
             self.dir_bits.pop();
-            self.default_do_files = unsafe {
-                RecursiveDoFilesState::default_do_files_for(&self.norm_path.as_ref())
-            };
+            self.default_do_files =
+                unsafe { RecursiveDoFilesState::default_do_files_for(&self.norm_path.as_ref()) };
         }
     }
 }
@@ -271,20 +282,28 @@ mod tests {
 
     #[test]
     fn path_splits_test() {
-        assert_eq!(path_splits(Path::new("foo.txt")), vec![
-            (Path::new(""), Path::new("foo.txt")),
-        ]);
-        assert_eq!(path_splits(Path::new("/foo.txt")), vec![
-            (Path::new("/"), Path::new("foo.txt")),
-        ]);
-        assert_eq!(path_splits(Path::new("foo/bar.txt")), vec![
-            (Path::new("foo"), Path::new("bar.txt")),
-            (Path::new(""), Path::new("foo/bar.txt")),
-        ]);
-        assert_eq!(path_splits(Path::new("foo/bar/baz.txt")), vec![
-            (Path::new("foo/bar"), Path::new("baz.txt")),
-            (Path::new("foo"), Path::new("bar/baz.txt")),
-            (Path::new(""), Path::new("foo/bar/baz.txt")),
-        ]);
+        assert_eq!(
+            path_splits(Path::new("foo.txt")),
+            vec![(Path::new(""), Path::new("foo.txt")),]
+        );
+        assert_eq!(
+            path_splits(Path::new("/foo.txt")),
+            vec![(Path::new("/"), Path::new("foo.txt")),]
+        );
+        assert_eq!(
+            path_splits(Path::new("foo/bar.txt")),
+            vec![
+                (Path::new("foo"), Path::new("bar.txt")),
+                (Path::new(""), Path::new("foo/bar.txt")),
+            ]
+        );
+        assert_eq!(
+            path_splits(Path::new("foo/bar/baz.txt")),
+            vec![
+                (Path::new("foo/bar"), Path::new("baz.txt")),
+                (Path::new("foo"), Path::new("bar/baz.txt")),
+                (Path::new(""), Path::new("foo/bar/baz.txt")),
+            ]
+        );
     }
 }

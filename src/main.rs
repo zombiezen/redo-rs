@@ -8,6 +8,7 @@ mod builder;
 mod env;
 mod helpers;
 mod jobserver;
+mod paths;
 mod state;
 
 fn main() {

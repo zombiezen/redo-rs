@@ -6,6 +6,7 @@ use nix::errno::Errno;
 use nix::fcntl::{self, FcntlArg};
 use nix::sys::wait::{self, WaitStatus};
 use nix::unistd::{self, ForkResult};
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{
     self, params, Connection, DropBehavior, OptionalExtension, Row, ToSql, TransactionBehavior,
     NO_PARAMS,
@@ -14,20 +15,22 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp;
 use std::collections::HashSet;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, Metadata, OpenOptions};
 use std::io;
 use std::mem;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::rc::Rc;
-use std::time::Duration;
+use std::str;
+use std::time::{Duration, SystemTime};
 
 use super::env::{self, Env};
 use super::helpers;
 
 const SCHEMA_VER: i32 = 2;
 
+/// An invalid filename that is always marked as dirty.
 const ALWAYS: &str = "//ALWAYS";
 
 /// fid offset for "log locks".
@@ -308,7 +311,7 @@ pub(crate) struct File {
     pub(crate) checked_runid: Option<i64>,
     pub(crate) changed_runid: Option<i64>,
     pub(crate) failed_runid: Option<i64>,
-    pub(crate) stamp: Option<String>,
+    pub(crate) stamp: Option<Stamp>,
     pub(crate) csum: Option<String>,
 }
 
@@ -422,14 +425,372 @@ impl File {
         Ok(())
     }
 
+    pub(crate) fn save(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
+        ptx.state.write(
+            "update Files set is_generated=?, \
+                              is_override=?, \
+                              checked_runid=?, \
+                              changed_runid=?, \
+                              failed_runid=?, \
+                              stamp=?, \
+                              csum=? where rowid=?",
+            params!(
+                self.is_generated,
+                self.is_override,
+                self.checked_runid,
+                self.changed_runid,
+                self.failed_runid,
+                self.stamp,
+                self.csum,
+                self.id
+            ),
+        )?;
+        Ok(())
+    }
+
     fn set_checked(&mut self, v: &Env) {
         self.checked_runid = v.runid;
+    }
+
+    fn set_changed(&mut self, v: &Env) {
+        self.changed_runid = v.runid;
+        self.failed_runid = None;
+        self.is_override = false;
+    }
+
+    pub(crate) fn set_failed(&mut self, v: &Env) -> Result<(), Error> {
+        self.update_stamp(v, false)?;
+        self.failed_runid = v.runid;
+
+        // if we failed and the target file still exists,
+        // then we're generated.
+        //
+        // if the target file now does *not* exist, then go back to
+        // treating this as a source file.  Since it doesn't exist,
+        // if someone tries to rebuild it immediately, it'll go
+        // back to being a target.  But if the file is manually
+        // created before that, we don't need a "manual override"
+        // warning.
+        self.is_generated = !self.stamp.as_ref().map(|s| s.is_missing()).unwrap_or(false);
+        Ok(())
+    }
+
+    pub(crate) fn set_static(&mut self, v: &Env) -> Result<(), Error> {
+        self.update_stamp(v, true)?;
+        self.failed_runid = None;
+        self.is_override = false;
+        self.is_generated = false;
+        Ok(())
+    }
+
+    fn set_override(&mut self, v: &Env) -> Result<(), Error> {
+        self.update_stamp(v, false)?;
+        self.failed_runid = None;
+        self.is_override = true;
+        Ok(())
+    }
+
+    fn update_stamp(&mut self, v: &Env, must_exist: bool) -> Result<(), Error> {
+        let newstamp = self.read_stamp(v)?;
+        if must_exist && newstamp.is_missing() {
+            return Err(format_err!("{:?} does not exist", self.name));
+        }
+        if self.stamp.as_ref() != Some(&newstamp) {
+            self.stamp = Some(newstamp);
+            self.set_changed(v);
+        }
+        Ok(())
+    }
+
+    /// Reports if this object represents a source (not a target).
+    pub(crate) fn is_source(&self, v: &Env) -> Result<bool, Error> {
+        if self.name.starts_with("//") {
+            // Special name, ignore.
+            return Ok(false);
+        }
+        let newstamp = self.read_stamp(v)?;
+        if self.is_generated
+            && (!self.is_failed(v) || !newstamp.is_missing())
+            && !self.is_override
+            && self.stamp.as_ref() == Some(&newstamp)
+        {
+            // Target is as we left it.
+            return Ok(false);
+        }
+        if (!self.is_generated || self.stamp.as_ref() != Some(&newstamp)) && newstamp.is_missing() {
+            // Target has gone missing after the last build.
+            // It's not usefully a source *or* a target.
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Reports if this object represents a target (not a source).
+    pub(crate) fn is_target(&self, v: &Env) -> Result<bool, Error> {
+        if !self.is_generated {
+            return Ok(false);
+        }
+        self.is_source(v).map(|b| !b)
+    }
+
+    fn is_checked(&self, v: &Env) -> bool {
+        match self.checked_runid {
+            Some(checked_runid) => checked_runid != 0 && checked_runid >= v.runid.unwrap(),
+            None => false,
+        }
+    }
+
+    fn is_changed(&self, v: &Env) -> bool {
+        match self.changed_runid {
+            Some(changed_runid) => changed_runid != 0 && changed_runid >= v.runid.unwrap(),
+            None => false,
+        }
+    }
+
+    fn is_failed(&self, v: &Env) -> bool {
+        match self.failed_runid {
+            Some(failed_runid) => failed_runid != 0 && failed_runid >= v.runid.unwrap(),
+            None => false,
+        }
+    }
+
+    /// Mark the list of dependencies of this object as deprecated.
+    ///
+    /// We do this when starting a new build of the current target.  We don't
+    /// delete them right away, because if the build fails, we still want to
+    /// know the old deps.
+    pub(crate) fn zap_deps1(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
+        ptx.state.write(
+            "update Deps set delete_me=? where target=?",
+            params!(true, self.id),
+        )?;
+        Ok(())
+    }
+
+    /// Delete any deps that were *not* referenced in the current run.
+    ///
+    /// Dependencies of a given target can change from one build to the next.
+    /// We forget old dependencies only after a build completes successfully.
+    pub(crate) fn zap_deps2(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
+        ptx.state.write(
+            "delete from Deps where target=? and delete_me=1",
+            params!(self.id),
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn add_dep(
+        &mut self,
+        ptx: &mut ProcessTransaction,
+        mode: DepMode,
+        dep: &str,
+    ) -> Result<(), Error> {
+        let src = File::from_name(ptx, dep, true)?;
+        assert_ne!(self.id, src.id);
+        ptx.state.write(
+            "insert or replace into Deps (target, mode, source, delete_me) values (?,?,?,?)",
+            params!(self.id, mode, src.id, false),
+        )?;
+        Ok(())
+    }
+
+    fn read_stamp_st<F: FnOnce(&Path) -> io::Result<Metadata>>(
+        &self,
+        v: &Env,
+        statfunc: F,
+    ) -> Result<(bool, Stamp), Error> {
+        match statfunc(&v.base.join(&self.name)) {
+            Ok(metadata) => Ok((
+                metadata.file_type().is_symlink(),
+                Stamp::from_metadata(&metadata)?,
+            )),
+            Err(e) => {
+                if e.kind() == io::ErrorKind::NotFound {
+                    Ok((false, Stamp::MISSING))
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
+    }
+
+    pub(crate) fn read_stamp(&self, v: &Env) -> Result<Stamp, Error> {
+        let (is_link, pre) = self.read_stamp_st(v, |p| fs::symlink_metadata(p))?;
+        Ok(if is_link {
+            // if we're a symlink, we actually care about the link object
+            // itself, *and* the target of the link.  If either changes,
+            // we're considered dirty.
+            //
+            // On the other hand, detect_override() doesn't care about the
+            // target of the link, only the link itself.
+            let (_, post) = self.read_stamp_st(v, |p| fs::metadata(p))?;
+            pre.with_link_target(&post)
+        } else {
+            pre
+        })
     }
 
     pub(crate) fn nice_name(&self, v: &Env) -> Result<String, Error> {
         Ok(relpath(v.base.join(&self.name), &v.startdir)?
             .to_string_lossy()
             .into_owned())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[non_exhaustive]
+#[repr(u8)]
+pub(crate) enum DepMode {
+    Created = b'c',
+    Modified = b'm',
+}
+
+impl DepMode {
+    fn from_char(c: u8) -> Option<DepMode> {
+        if c == DepMode::Created as u8 {
+            Some(DepMode::Created)
+        } else if c == DepMode::Modified as u8 {
+            Some(DepMode::Modified)
+        } else {
+            None
+        }
+    }
+
+    fn into_str(self) -> &'static str {
+        const CREATED_STR: &[u8] = &[DepMode::Created as u8];
+        const MODIFIED_STR: &[u8] = &[DepMode::Modified as u8];
+        unsafe {
+            str::from_utf8_unchecked(match self {
+                DepMode::Created => CREATED_STR,
+                DepMode::Modified => MODIFIED_STR,
+            })
+        }
+    }
+}
+
+impl From<DepMode> for u8 {
+    #[inline]
+    fn from(mode: DepMode) -> u8 {
+        mode as u8
+    }
+}
+
+impl From<DepMode> for &'static str {
+    #[inline]
+    fn from(mode: DepMode) -> &'static str {
+        mode.into_str()
+    }
+}
+
+impl FromSql for DepMode {
+    fn column_result(value: ValueRef) -> FromSqlResult<DepMode> {
+        match value {
+            ValueRef::Text(&[c]) => DepMode::from_char(c)
+                .ok_or_else(|| FromSqlError::Other(format_err!("unknown dep mode {:?}", c).into())),
+            ValueRef::Text(s) => Err(FromSqlError::Other(
+                format_err!("unknown dep mode {:?}", s).into(),
+            )),
+            _ => Err(FromSqlError::InvalidType),
+        }
+    }
+}
+
+impl ToSql for DepMode {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+        Ok(ToSqlOutput::Borrowed(ValueRef::Text(
+            self.into_str().as_bytes(),
+        )))
+    }
+}
+
+/// Serialized file metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub(crate) struct Stamp(Cow<'static, str>);
+
+impl Stamp {
+    /// The stamp of a directory; mtime is unhelpful.
+    pub(crate) const DIR: Stamp = Stamp(Cow::Borrowed("dir"));
+
+    /// The stamp of a nonexistent file.
+    pub(crate) const MISSING: Stamp = Stamp(Cow::Borrowed("0"));
+
+    fn from_metadata(metadata: &fs::Metadata) -> Result<Stamp, Error> {
+        use std::os::unix::fs::MetadataExt;
+
+        if metadata.is_dir() {
+            // Directories change too much; detect only existence.
+            return Ok(Stamp::DIR);
+        }
+        // A "unique identifier" stamp for a regular file.
+        let mtime = metadata
+            .modified()?
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs_f64();
+        Ok(Stamp(Cow::Owned(format!(
+            "{:.6}-{}-{}-{}-{}-{}",
+            mtime,
+            metadata.len(),
+            metadata.ino(),
+            metadata.mode(),
+            metadata.uid(),
+            metadata.gid()
+        ))))
+    }
+
+    fn with_link_target(self, dst_stamp: &Stamp) -> Stamp {
+        let mut s = self.0.into_owned();
+        s.push_str("+");
+        s.push_str(&dst_stamp.0);
+        Stamp(Cow::Owned(s))
+    }
+
+    #[inline]
+    pub(crate) fn is_missing(&self) -> bool {
+        self == &Stamp::MISSING
+    }
+
+    /// Determine if two stamps differ in a way that means manual override.
+    ///
+    /// When two stamps differ at all, that means the source is dirty and so we
+    /// need to rebuild.  If they differ in mtime or size, then someone has surely
+    /// edited the file, and we don't want to trample their changes.
+    ///
+    /// But if the only difference is something else (like ownership, st_mode,
+    /// etc) then that might be a false positive; it's annoying to mark as
+    /// overridden in that case, so we return `false`.  (It's still dirty though!)
+    pub(crate) fn detect_override(stamp1: &Stamp, stamp2: &Stamp) -> bool {
+        if stamp1 == stamp2 {
+            return false;
+        }
+        let crit1 = stamp1.0.splitn(3, '-').take(2);
+        let crit2 = stamp2.0.splitn(3, '-').take(2);
+        !crit1.eq(crit2)
+    }
+}
+
+impl Default for Stamp {
+    #[inline]
+    fn default() -> Stamp {
+        Stamp::MISSING
+    }
+}
+
+impl From<String> for Stamp {
+    #[inline]
+    fn from(s: String) -> Stamp {
+        Stamp(Cow::Owned(s))
+    }
+}
+
+impl FromSql for Stamp {
+    fn column_result(value: ValueRef) -> FromSqlResult<Stamp> {
+        String::column_result(value).map(|s| s.into())
+    }
+}
+
+impl ToSql for Stamp {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+        Ok(ToSqlOutput::Borrowed(ValueRef::Text(self.0.as_bytes())))
     }
 }
 

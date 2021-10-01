@@ -207,7 +207,7 @@ impl JobServer {
         let mut max_delay: Option<TimeVal> =
             max_delay.map(|d| helpers::timeval_from_duration(&d).into());
         select::select(None, Some(&mut rfds), None, None, max_delay.as_mut())?;
-        for fd in helpers::FdSetIter::from(rfds) {
+        for fd in rfds.fds(None) {
             if fd == self.token_fds.0 {
                 continue;
             }
@@ -436,7 +436,7 @@ impl JobServer {
         // in order for the universe to stay in balance.
         self.destroy_tokens(1);
         let (r, w) = make_pipe(50)?;
-        match unistd::fork()? {
+        match unsafe { unistd::fork()? } {
             ForkResult::Child => {
                 if let Err(e) = unistd::close(r) {
                     process::exit(201);

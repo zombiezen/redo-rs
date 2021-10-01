@@ -153,48 +153,6 @@ extern "C" {
     fn setitimer(which: c_int, new_value: *const itimerval, old_value: *mut itimerval) -> c_int;
 }
 
-// TODO(soon): Use `fds()` method I added in https://github.com/nix-rust/nix/pull/1207
-#[derive(Clone, Debug)]
-pub(crate) struct FdSetIter {
-    set: FdSet,
-    curr: RawFd,
-}
-
-impl From<FdSet> for FdSetIter {
-    #[inline]
-    fn from(set: FdSet) -> FdSetIter {
-        FdSetIter { set, curr: 0 }
-    }
-}
-
-impl Iterator for FdSetIter {
-    type Item = RawFd;
-
-    fn next(&mut self) -> Option<RawFd> {
-        let highest = match self.set.highest() {
-            Some(highest) => highest,
-            None => return None,
-        };
-        while self.curr < highest {
-            let curr = self.curr;
-            self.curr += 1;
-            if self.set.contains(curr) {
-                return Some(curr);
-            }
-        }
-        None
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self.set.clone().highest() {
-            None => (0, Some(0)),
-            Some(highest) => (0, Some((highest - self.curr) as usize + 1)),
-        }
-    }
-}
-
-impl FusedIterator for FdSetIter {}
-
 /// Return the shortest path name equivalent to path by purely lexical
 /// processing. It applies the following rules iteratively until no further
 /// processing can be done:

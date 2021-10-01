@@ -828,7 +828,7 @@ impl LockManager {
         // We wait for the lock here, just in case others are doing
         // this test at the same time.
         pl.wait_lock(LockType::Exclusive)?;
-        match unistd::fork() {
+        match unsafe { unistd::fork() } {
             Ok(ForkResult::Parent { child: pid }) => match wait::waitpid(pid, None) {
                 Ok(WaitStatus::Exited(_, status)) => Ok(status != 0),
                 Ok(_) => Ok(true),

@@ -332,7 +332,7 @@ impl JobServer {
         state.wait_fds.clear();
         state.create_tokens(n as i32);
         if state.has_token() {
-            state.release_except_mine(self.token_fds);
+            state.release_except_mine(self.token_fds)?;
             assert_eq!(state.my_tokens, 1);
         }
         assert!(
@@ -589,10 +589,13 @@ impl JobStarter {
             let token_future = self.ensure_token(reason).fuse();
             let mut token_future = Box::pin(token_future);
             let mut timeout = self.sleep(cmp::min(Duration::from_secs(1), backoff)).fuse();
-            let res: Result<bool, Error> = select! {
+            let got_token = select! {
                 res = token_future => res.map(|_| true),
                 _ = timeout => Ok(false),
-            };
+            }?;
+            if got_token {
+                return Ok(());
+            }
             backoff *= 2;
             {
                 let has_token = {

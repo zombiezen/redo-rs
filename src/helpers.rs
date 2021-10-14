@@ -1,7 +1,6 @@
 use libc::{c_int, itimerval, timeval};
 use nix::errno::{self, Errno};
 use nix::fcntl::{self, FcntlArg, FdFlag};
-use nix::sys::select::FdSet;
 use nix::unistd;
 use nix::{self, NixPath};
 use std::borrow::Cow;
@@ -103,8 +102,8 @@ impl From<&IntervalTimerValue> for itimerval {
     #[inline]
     fn from(val: &IntervalTimerValue) -> itimerval {
         itimerval {
-            it_interval: timeval_from_duration(&val.interval),
-            it_value: timeval_from_duration(&val.value),
+            it_interval: timeval_from_duration(val.interval),
+            it_value: timeval_from_duration(val.value),
         }
     }
 }
@@ -115,7 +114,7 @@ pub(crate) fn duration_from_timeval(tv: &timeval) -> Duration {
 }
 
 #[inline]
-pub(crate) const fn timeval_from_duration(d: &Duration) -> timeval {
+pub(crate) const fn timeval_from_duration(d: Duration) -> timeval {
     timeval {
         tv_sec: d.as_secs() as i64,
         tv_usec: d.subsec_micros() as i64,

@@ -7,6 +7,7 @@ edition = "2018"
 [dependencies]
 common-path = "1.0.0"
 failure = "0.1.6"
+futures = "0.3.17"
 libc = "0.2.67"
 libsqlite3-sys = "0.17.1"
 nix = "0.21.0"

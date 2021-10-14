@@ -5,12 +5,13 @@ use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt::{self, Display};
 use std::fs::File;
+use std::future::{self, Future};
 use std::io;
 use std::os::unix::io::RawFd;
 use std::path::{self, Path, PathBuf};
 
 use super::env::Env;
-use super::jobserver::JobServer;
+use super::jobserver::JobStarter;
 use super::paths::{self, DoFile};
 use super::state::{self, Lock, ProcessState, ProcessTransaction, Stamp};
 
@@ -52,7 +53,7 @@ struct BuildJob {
 
 impl BuildJob {
     /// Actually start running this job in a subproc, if needed.
-    fn start(mut self, ps: &mut ProcessState, server: &mut JobServer) -> Result<(), Error> {
+    async fn start(mut self, ps: &mut ProcessState, server: &mut JobStarter) -> Result<(), Error> {
         debug_assert!(self.lock.is_owned());
         let (is_target, dirty) = (self.should_build_func.take().unwrap())(&self.t)?;
         if !dirty {
@@ -61,7 +62,7 @@ impl BuildJob {
             return BuildJob::finalize(self.lock, self.done_func, self.t, 0);
         }
         if ps.env().no_oob || dirty {
-            self.start_self(ps)
+            self.start_self(ps, server).await
         } else {
             //self.start_deps_unlocked(dirty)
             unimplemented!()
@@ -69,7 +70,11 @@ impl BuildJob {
     }
 
     /// Run `JobServer::start` to build this object's target file.
-    fn start_self(mut self, ps: &mut ProcessState) -> Result<(), Error> {
+    async fn start_self(
+        mut self,
+        ps: &mut ProcessState,
+        server: &mut JobStarter,
+    ) -> Result<(), Error> {
         debug_assert!(self.lock.is_owned());
         let t = self.t;
         let mut sf = self.sf;
@@ -116,6 +121,7 @@ impl BuildJob {
                 }
             };
             // TODO(now): Create stdout temp file and so on.
+            server.start(|| 0)?.await;
             Ok(())
         }
     }
@@ -137,9 +143,9 @@ impl BuildJob {
     }
 }
 
-pub(crate) fn run<S: AsRef<str>>(
+pub(crate) async fn run<S: AsRef<str>>(
     ps: &mut ProcessState,
-    server: &mut JobServer,
+    server: &mut JobStarter,
     targets: &[S],
 ) -> Result<(), BuildError> {
     for t in targets {
@@ -204,6 +210,7 @@ pub(crate) fn run<S: AsRef<str>>(
             // TODO(maybe): Commit state if !has_token.
             server
                 .ensure_token_or_cheat(t, &mut cheat)
+                .await
                 .context(BuildErrorKind::Generic)?;
             if result.is_err() && !ps.env().keep_going {
                 break;

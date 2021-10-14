@@ -73,6 +73,10 @@
 //! simpler :)
 
 use failure::{format_err, Error};
+use futures::future::FusedFuture;
+use futures::stream::Stream;
+use futures::task;
+use futures::{pin_mut, select};
 use libc::{self, c_int, timeval};
 use nix::errno::Errno;
 use nix::fcntl;
@@ -81,40 +85,55 @@ use nix::sys::signal::{self, SigHandler, Signal};
 use nix::sys::time::TimeVal;
 use nix::sys::wait::{self, WaitStatus};
 use nix::unistd::{self, ForkResult, Pid};
+use std::cell::RefCell;
 use std::cmp;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::env::{self, VarError};
-use std::fmt::{self, Debug};
+use std::future::Future;
 use std::iter;
 use std::os::unix::io::RawFd;
+use std::pin::Pin;
 use std::process;
-use std::time::Duration;
+use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::helpers::{self, IntervalTimer, IntervalTimerValue};
 
-struct Job {
-    name: String,
+/// Metadata about a running job.
+#[derive(Debug)]
+pub(crate) struct Job {
     pid: Pid,
-    done_func: Box<dyn FnOnce(String, i32)>,
+    state: Rc<RefCell<JobState>>,
 }
 
-impl<'a> Debug for Job {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Job")
-            .field("name", &self.name)
-            .field("pid", &self.pid)
-            .field("donefunc", &())
-            .finish()
+impl Future for Job {
+    type Output = i32;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<i32> {
+        let mut state = self.state.borrow_mut();
+        match state.exit_code {
+            Some(exit_code) => Poll::Ready(exit_code),
+            None => {
+                state.waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct JobState {
+    exit_code: Option<i32>,
+    waker: Option<Waker>,
 }
 
 #[derive(Debug)]
 pub(crate) struct JobServer {
-    my_tokens: i32,
-    cheats: i32,
     token_fds: (RawFd, RawFd),
     cheat_fds: (RawFd, RawFd),
-    wait_fds: HashMap<RawFd, Job>,
+    state: Rc<RefCell<ServerState>>,
 }
 
 impl JobServer {
@@ -170,15 +189,18 @@ impl JobServer {
         // TODO(soon): Don't start server if MAKEFLAGS is set.
         let token_fds = make_pipe(100)?;
         let realmax = if max_jobs == 0 { 1 } else { max_jobs };
-        let mut server = JobServer {
+        let mut state = ServerState {
             my_tokens: 1,
-            cheats: 0,
+            ..Default::default()
+        };
+        state.create_tokens(realmax - 1);
+        state.release_except_mine(token_fds)?;
+        let state = Rc::new(RefCell::new(state));
+        let server = JobServer {
+            state,
             token_fds,
             cheat_fds,
-            wait_fds: HashMap::new(),
         };
-        server.create_tokens(realmax - 1);
-        server.release_except_mine()?;
         env::set_var(
             MAKEFLAGS_VAR,
             format!(
@@ -189,61 +211,169 @@ impl JobServer {
         Ok(server)
     }
 
-    /// Wait for a subproc to die or, if `want_token`, `token_fds.0` to be readable.
-    ///
-    /// Does not actually read `token_fds.0` once it's readable (so someone else
-    /// might read it before us).  This function returns after `max_delay` or
-    /// when at least one subproc dies or (if `want_token`) for `token_fds.0` to
-    /// be readable.
-    fn wait(&mut self, want_token: bool, max_delay: Option<Duration>) -> Result<(), Error> {
+    /// Get a clonable handle to the server.
+    pub(crate) fn starter(&self) -> JobStarter {
+        JobStarter {
+            token_fds: self.token_fds,
+            state: self.state.clone(),
+        }
+    }
+
+    /// Run all tasks in the job server to completion.
+    pub(crate) fn block_on<T, F, E>(&mut self, f: F) -> Result<T, Error>
+    where
+        E: Into<Error>,
+        F: Future<Output = Result<T, E>>,
+    {
+        // TODO(someday): Prevent calling recursively.
         let mut rfds: FdSet = FdSet::new();
-        for k in self.wait_fds.keys().copied() {
-            rfds.insert(k);
-        }
-        if want_token {
-            rfds.insert(self.token_fds.0);
-        }
-        assert!(rfds.highest().is_some());
-        let mut max_delay: Option<TimeVal> =
-            max_delay.map(|d| helpers::timeval_from_duration(&d).into());
-        select::select(None, Some(&mut rfds), None, None, max_delay.as_mut())?;
-        for fd in rfds.fds(None) {
-            if fd == self.token_fds.0 {
-                continue;
-            }
-            // redo subprocesses are expected to die without releasing their
-            // tokens, so things are less likely to get confused if they
-            // die abnormally.  Since a child has died, that means a token has
-            // 'disappeared' and we now need to recreate it.
-            let mut b: [u8; 1] = [0];
-            match try_read(self.cheat_fds.0, &mut b) {
-                Ok(Some(1)) => {
-                    // someone exited with _cheats > 0, so we need to compensate
-                    // by *not* re-creating a token now.
+        let waker = task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        pin_mut!(f);
+        loop {
+            match Future::poll(f.as_mut(), &mut cx) {
+                Poll::Ready(x) => {
+                    return x.map_err(|e| e.into());
                 }
-                Ok(None) | Ok(Some(0)) => {
-                    self.create_tokens(1);
-                    if self.has_token() {
-                        self.release_except_mine();
+                Poll::Pending => {
+                    let now = Instant::now();
+                    let mut state = self.state.borrow_mut();
+
+                    // If there are any timers that have triggered during the run, don't
+                    // bother waiting on I/O. Wake their futures immediately.
+                    let mut timers_fired = false;
+                    while state.timers.front().map_or(false, |&(fire, _)| fire < now) {
+                        let (_, w) = state.timers.pop_front().unwrap();
+                        w.wake();
+                        timers_fired = true;
+                    }
+                    if timers_fired {
+                        continue;
+                    }
+
+                    rfds.clear();
+                    for k in state.wait_fds.keys().copied() {
+                        rfds.insert(k);
+                    }
+                    if !state.token_wakers.is_empty() {
+                        rfds.insert(self.token_fds.0);
+                    }
+                    let next_timer_duration = state.timers.front().map(|&(fire, _)| fire - now);
+                    if rfds.highest().is_none() {
+                        // No I/O to wait on.
+                        if let Some(d) = next_timer_duration {
+                            thread::sleep(d);
+                            continue;
+                        }
+                        return Err(format_err!("JobServer deadlock"));
+                    }
+                    let mut max_delay: Option<TimeVal> =
+                        next_timer_duration.map(|d| helpers::timeval_from_duration(d).into());
+                    select::select(None, Some(&mut rfds), None, None, max_delay.as_mut())?;
+
+                    for fd in rfds.fds(None) {
+                        if fd == self.token_fds.0 {
+                            if let Some(w) = state.token_wakers.pop_front() {
+                                state.token_ready = true;
+                                w.wake();
+                            }
+                            continue;
+                        }
+                        // redo subprocesses are expected to die without releasing their
+                        // tokens, so things are less likely to get confused if they
+                        // die abnormally.  Since a child has died, that means a token has
+                        // 'disappeared' and we now need to recreate it.
+                        let mut b: [u8; 1] = [0];
+                        match try_read(self.cheat_fds.0, &mut b) {
+                            Ok(Some(1)) => {
+                                // someone exited with _cheats > 0, so we need to compensate
+                                // by *not* re-creating a token now.
+                            }
+                            Ok(None) | Ok(Some(0)) => {
+                                state.create_tokens(1);
+                                if state.has_token() {
+                                    state.release_except_mine(self.token_fds)?;
+                                }
+                            }
+                            Err(e) => return Err(e.into()),
+                            Ok(Some(_)) => unreachable!("only 1 byte possible to read"),
+                        }
+                        unistd::close(fd)?;
+                        let pd = state.wait_fds.remove(&fd).unwrap();
+                        let rv = wait::waitpid(Some(pd.pid), None)?;
+                        assert_eq!(rv.pid(), Some(pd.pid));
+                        let status = match rv {
+                            WaitStatus::Exited(_, status) => status,
+                            WaitStatus::Signaled(_, signal, _) => -(signal as i32),
+                            _ => return Err(format_err!("unhandled process status: {:?}", rv)),
+                        };
+                        {
+                            let mut state = pd.state.borrow_mut();
+                            state.exit_code = Some(status);
+                            if let Some(w) = state.waker.take() {
+                                w.wake();
+                            }
+                        }
                     }
                 }
-                Err(e) => return Err(e.into()),
-                Ok(Some(_)) => unreachable!("only 1 byte possible to read"),
             }
-            unistd::close(fd)?;
-            let pd = self.wait_fds.remove(&fd).unwrap();
-            let rv = wait::waitpid(Some(pd.pid), None)?;
-            assert_eq!(rv.pid(), Some(pd.pid));
-            let status = match rv {
-                WaitStatus::Exited(_, status) => status,
-                WaitStatus::Signaled(_, signal, _) => -(signal as i32),
-                _ => return Err(format_err!("unhandled process status: {:?}", rv)),
-            };
-            (pd.done_func)(pd.name, status);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_running(&self) -> bool {
+        self.state.borrow().is_running()
+    }
+
+    /// Release or destroy all the tokens we own, in preparation for exit.
+    pub(crate) fn force_return_tokens(&mut self) -> Result<(), Error> {
+        let mut state = self.state.borrow_mut();
+        let n = state.wait_fds.len();
+        state.wait_fds.clear();
+        state.create_tokens(n as i32);
+        if state.has_token() {
+            state.release_except_mine(self.token_fds);
+            assert_eq!(state.my_tokens, 1);
+        }
+        assert!(
+            state.cheats <= state.my_tokens,
+            "mytokens={}, cheats={}",
+            state.my_tokens,
+            state.cheats
+        );
+        assert!(
+            state.cheats == 0 || state.cheats == 1,
+            "cheats={}",
+            state.cheats
+        );
+        if state.cheats > 0 {
+            let cheats = state.cheats;
+            state.destroy_tokens(cheats);
+            write_tokens(self.cheat_fds.1, state.cheats as usize)?;
         }
         Ok(())
     }
+}
 
+impl Drop for JobServer {
+    fn drop(&mut self) {
+        let _ = self.force_return_tokens();
+    }
+}
+
+#[derive(Debug, Default)]
+struct ServerState {
+    my_tokens: i32,
+    cheats: i32,
+    wait_fds: HashMap<RawFd, Job>,
+
+    token_ready: bool,
+    token_wakers: VecDeque<Waker>,
+
+    timers: VecDeque<(Instant, Waker)>,
+}
+
+impl ServerState {
     /// Materialize and own `n` tokens.
     ///
     /// If there are any cheater tokens active, they each destroy one matching
@@ -266,7 +396,18 @@ impl JobServer {
         self.my_tokens -= n;
     }
 
-    fn release(&mut self, n: i32) -> nix::Result<()> {
+    #[inline]
+    fn is_running(&self) -> bool {
+        !self.wait_fds.is_empty()
+    }
+
+    #[inline]
+    fn has_token(&self) -> bool {
+        assert!(self.my_tokens >= 0);
+        self.my_tokens >= 1
+    }
+
+    fn release(&mut self, token_fds: (RawFd, RawFd), n: i32) -> nix::Result<()> {
         assert!(n >= 0);
         assert!(self.my_tokens >= n);
         let mut n_to_share = 0usize;
@@ -281,61 +422,130 @@ impl JobServer {
         assert!(self.my_tokens >= 0);
         assert!(self.cheats >= 0);
         if n_to_share > 0 {
-            write_tokens(self.token_fds.1, n_to_share)?;
+            write_tokens(token_fds.1, n_to_share)?;
         }
         Ok(())
     }
 
-    fn release_except_mine(&mut self) -> nix::Result<()> {
+    fn release_except_mine(&mut self, token_fds: (RawFd, RawFd)) -> nix::Result<()> {
         assert!(self.my_tokens > 0);
-        self.release(self.my_tokens - 1)
+        self.release(token_fds, self.my_tokens - 1)
     }
+}
 
+/// A cloneable handle to JobServer that starts jobs.
+#[derive(Clone, Debug)]
+pub(crate) struct JobStarter {
+    token_fds: (RawFd, RawFd),
+    state: Rc<RefCell<ServerState>>,
+}
+
+impl JobStarter {
     #[inline]
     pub(crate) fn has_token(&self) -> bool {
-        assert!(self.my_tokens >= 0);
-        self.my_tokens >= 1
+        self.state.borrow().has_token()
+    }
+
+    /// Start a new job.
+    ///
+    /// # Panics
+    ///
+    /// If `has_token()` returns `false`.
+    pub(crate) fn start<F>(&self, job_func: F) -> Result<Job, Error>
+    where
+        F: FnOnce() -> i32,
+    {
+        {
+            let mut state = self.state.borrow_mut();
+            assert_eq!(state.my_tokens, 1);
+            // Subprocesses always start with 1 token, so we have to destroy ours
+            // in order for the universe to stay in balance.
+            state.destroy_tokens(1);
+        }
+        let (r, w) = make_pipe(50)?;
+        match unsafe { unistd::fork()? } {
+            ForkResult::Child => {
+                if let Err(e) = unistd::close(r) {
+                    process::exit(201);
+                }
+                process::exit(job_func());
+            }
+            ForkResult::Parent { child: pid } => {
+                helpers::close_on_exec(r, true)?;
+                unistd::close(w)?;
+                let job_state = Rc::new(RefCell::new(JobState::default()));
+                self.state.borrow_mut().wait_fds.insert(
+                    r,
+                    Job {
+                        pid,
+                        state: job_state.clone(),
+                    },
+                );
+                Ok(Job {
+                    pid,
+                    state: job_state,
+                })
+            }
+        }
+    }
+
+    /// Return a future that is ready once a duration has elapsed.
+    #[inline]
+    pub(crate) fn sleep(&self, d: Duration) -> Sleep {
+        Sleep {
+            end: Instant::now() + d,
+            done: false,
+            state: self.state.clone(),
+        }
     }
 
     /// Don't return until this process has a job token.
     ///
     /// - `reason`: the reason (for debugging purposes) we need a token.  Usually
     ///   the name of a target we want to build.
-    /// - `max_delay`: the max time to wait for a token, or `None` if forever.
     ///
-    /// `has_token` will report `true` after this function returns *unless*
-    /// `max_delay` is not `None` and we timed out.
-    fn ensure_token(&mut self, reason: &str, max_delay: Option<Duration>) -> Result<(), Error> {
-        assert!(self.my_tokens <= 1);
+    /// `has_token` will report `true` after this function returns with `Ok`.
+    async fn ensure_token(&self, _reason: &str) -> Result<(), Error> {
+        use futures::stream::StreamExt;
+
+        let mut token_stream = TokenStream {
+            state: self.state.clone(),
+        };
+        assert!(self.state.borrow().my_tokens <= 1);
         loop {
-            if self.my_tokens >= 1 {
-                debug_assert_eq!(self.my_tokens, 1);
-                break;
+            {
+                let state = self.state.borrow();
+                if state.my_tokens >= 1 {
+                    debug_assert_eq!(state.my_tokens, 1);
+                    break;
+                }
+                debug_assert!(state.my_tokens < 1);
             }
-            debug_assert!(self.my_tokens < 1);
-            self.wait(true, max_delay)?;
-            if self.my_tokens >= 1 {
-                break;
+            token_stream.next().await;
+            {
+                let state = self.state.borrow();
+                if state.my_tokens >= 1 {
+                    break;
+                }
+                debug_assert!(state.my_tokens < 1);
             }
-            debug_assert!(self.my_tokens < 1);
             let mut b: [u8; 1] = [0];
             match try_read(self.token_fds.0, &mut b)? {
                 Some(0) => {
                     return Err(format_err!("unexpected EOF on token read"));
                 }
                 Some(1) => {
-                    self.my_tokens += 1;
+                    let mut state = self.state.borrow_mut();
+                    state.my_tokens += 1;
                     break;
                 }
                 Some(_) => unreachable!("only reading 1 byte"),
                 None => {
-                    if max_delay.is_some() {
-                        break;
-                    }
+                    // Token may have been stolen.
                 }
             }
         }
-        debug_assert!(self.my_tokens <= 1);
+        debug_assert!(self.state.borrow().my_tokens <= 1);
         Ok(())
     }
 
@@ -352,117 +562,122 @@ impl JobServer {
     /// `cheatfunc`: a function which returns n > 0 (usually 1) if we should
     /// cheat right now, because we're the "foreground" process that must
     /// be allowed to continue.
-    pub(crate) fn ensure_token_or_cheat<C>(
-        &mut self,
+    pub(crate) async fn ensure_token_or_cheat<C>(
+        &self,
         reason: &str,
         mut cheat_func: C,
     ) -> Result<(), Error>
     where
         C: FnMut() -> Result<i32, Error>,
     {
+        use futures::future::FutureExt;
+
         let mut backoff = Duration::from_millis(10);
         while !self.has_token() {
-            while self.is_running() && !self.has_token() {
+            loop {
+                {
+                    let state = self.state.borrow();
+                    if !state.is_running() || state.has_token() {
+                        break;
+                    }
+                }
                 // If we already have a subproc running, then effectively we
                 // already have a token.  Don't create a cheater token unless
                 // we're completely idle.
-                self.ensure_token(reason, None);
+                self.ensure_token(reason).await?;
             }
-            self.ensure_token(reason, Some(cmp::min(Duration::from_secs(1), backoff)));
+            let token_future = self.ensure_token(reason).fuse();
+            let mut token_future = Box::pin(token_future);
+            let mut timeout = self.sleep(cmp::min(Duration::from_secs(1), backoff)).fuse();
+            let res: Result<bool, Error> = select! {
+                res = token_future => res.map(|_| true),
+                _ = timeout => Ok(false),
+            };
             backoff *= 2;
-            if !self.has_token() {
-                debug_assert_eq!(self.my_tokens, 0);
-                let n = cheat_func()?;
-                if n > 0 {
-                    self.my_tokens += n;
-                    self.cheats += n;
-                    break;
+            {
+                let has_token = {
+                    let state = self.state.borrow();
+                    let has_token = state.has_token();
+                    if !has_token {
+                        debug_assert_eq!(state.my_tokens, 0);
+                    }
+                    has_token
+                };
+                if !has_token {
+                    let n = cheat_func()?;
+                    if n > 0 {
+                        let mut state = self.state.borrow_mut();
+                        state.my_tokens += n;
+                        state.cheats += n;
+                        return Ok(());
+                    }
                 }
             }
         }
         Ok(())
     }
+}
 
-    #[inline]
-    pub(crate) fn is_running(&self) -> bool {
-        !self.wait_fds.is_empty()
-    }
+/// A simple timer created by `JobStarter.sleep`.
+#[derive(Clone, Debug)]
+pub(crate) struct Sleep {
+    end: Instant,
+    done: bool,
+    state: Rc<RefCell<ServerState>>,
+}
 
-    /// Release or destroy all the tokens we own, in preparation for exit.
-    pub(crate) fn force_return_tokens(&mut self) -> Result<(), Error> {
-        let n = self.wait_fds.len();
-        self.wait_fds.clear();
-        self.create_tokens(n as i32);
-        if self.has_token() {
-            self.release_except_mine();
-            assert_eq!(self.my_tokens, 1);
-        }
-        assert!(
-            self.cheats <= self.my_tokens,
-            "mytokens={}, cheats={}",
-            self.my_tokens,
-            self.cheats
-        );
-        assert!(
-            self.cheats == 0 || self.cheats == 1,
-            "cheats={}",
-            self.cheats
-        );
-        if self.cheats > 0 {
-            self.destroy_tokens(self.cheats);
-            write_tokens(self.cheat_fds.1, self.cheats as usize)?;
-        }
-        Ok(())
-    }
+impl Future for Sleep {
+    type Output = Instant;
 
-    /// Start a new job.
-    ///
-    /// # Panics
-    ///
-    /// If `has_token()` returns `false`.
-    pub(crate) fn start<R, F, D>(
-        &mut self,
-        reason: R,
-        job_func: F,
-        done_func: D,
-    ) -> Result<(), Error>
-    where
-        R: Into<String>,
-        F: FnOnce() -> i32,
-        D: FnOnce(String, i32) + 'static,
-    {
-        assert_eq!(self.my_tokens, 1);
-        // Subprocesses always start with 1 token, so we have to destroy ours
-        // in order for the universe to stay in balance.
-        self.destroy_tokens(1);
-        let (r, w) = make_pipe(50)?;
-        match unsafe { unistd::fork()? } {
-            ForkResult::Child => {
-                if let Err(e) = unistd::close(r) {
-                    process::exit(201);
-                }
-                process::exit(job_func());
-            }
-            ForkResult::Parent { child: pid } => {
-                helpers::close_on_exec(r, true);
-                unistd::close(w)?;
-                self.wait_fds.insert(
-                    r,
-                    Job {
-                        name: reason.into(),
-                        pid,
-                        done_func: Box::new(done_func),
-                    },
-                );
-                Ok(())
-            }
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Instant> {
+        let now = Instant::now();
+        if now >= self.end {
+            self.done = true;
+            Poll::Ready(now)
+        } else {
+            // TODO(someday): Replace any old wakers in the queue.
+            // TODO(someday): Drop any old wakers in the queue when dropped.
+            let mut state = self.state.borrow_mut();
+            let i = state.timers.partition_point(|&(fire, _)| fire <= self.end);
+            state.timers.insert(i, (self.end, cx.waker().clone()));
+            Poll::Pending
         }
     }
 }
 
-impl Drop for JobServer {
-    fn drop(&mut self) {
-        let _ = self.force_return_tokens();
+impl FusedFuture for Sleep {
+    fn is_terminated(&self) -> bool {
+        self.done
+    }
+}
+
+/// A stream for `tokens_fds.0` becoming readable.
+///
+/// Does not actually read `token_fds.0` once it's readable, so someone else
+/// might read it before us.
+#[derive(Debug)]
+struct TokenStream {
+    state: Rc<RefCell<ServerState>>,
+}
+
+impl Stream for TokenStream {
+    type Item = ();
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<()>> {
+        let mut state = self.state.borrow_mut();
+        if state.token_ready {
+            state.token_ready = false;
+            Poll::Ready(Some(()))
+        } else {
+            // TODO(someday): Replace any old wakers in the queue. For now, using FILO.
+            // TODO(someday): Drop any old wakers in the queue when dropped.
+            state.token_wakers.push_front(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, None)
     }
 }
 
@@ -523,4 +738,62 @@ fn write_tokens(fd: RawFd, n: usize) -> nix::Result<()> {
     // TODO(someday): Retry if interrupted or short write.
     unistd::write(fd, &buf)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_job() {
+        let mut server = JobServer::setup(1).unwrap();
+        let job = server.starter().start(|| 4).unwrap();
+        let rv = server
+            .block_on(async { Result::<_, Error>::Ok(job.await) })
+            .unwrap();
+        assert_eq!(rv, 4);
+    }
+
+    #[test]
+    fn sleep() {
+        let mut server = JobServer::setup(1).unwrap();
+        let start = Instant::now();
+        const SLEEP_DURATION: Duration = Duration::from_millis(100);
+        let timer = server.starter().sleep(SLEEP_DURATION);
+        let awake = server
+            .block_on(async { Result::<_, Error>::Ok(timer.await) })
+            .unwrap();
+        assert!(
+            awake - start >= SLEEP_DURATION,
+            "start={:?}, awake={:?}",
+            start,
+            awake
+        );
+    }
+
+    #[test]
+    fn sleep_concurrently_with_job() {
+        use futures::future;
+        let mut server = JobServer::setup(1).unwrap();
+        let start = Instant::now();
+        const SLEEP_DURATION: Duration = Duration::from_millis(100);
+        let job = server
+            .starter()
+            .start(|| {
+                thread::sleep(SLEEP_DURATION + SLEEP_DURATION);
+                4
+            })
+            .unwrap();
+        let timer = server.starter().sleep(SLEEP_DURATION);
+        let (rv, awake) = server
+            .block_on(async { Result::<_, Error>::Ok(future::join(job, timer).await) })
+            .unwrap();
+        assert_eq!(rv, 4);
+        assert!(
+            awake - start >= SLEEP_DURATION,
+            "start={:?}, awake={:?}",
+            start,
+            awake
+        );
+    }
 }

@@ -64,11 +64,11 @@ impl<'a> FusedIterator for DefaultDoFiles<'a> {}
 
 #[derive(Clone, Debug)]
 pub(crate) struct DoFile {
-    do_dir: PathBuf,
-    do_file: OsString,
-    base_dir: Cow<'static, Path>,
-    base_name: PathBuf,
-    ext: Cow<'static, OsStr>,
+    pub(crate) do_dir: PathBuf,
+    pub(crate) do_file: OsString,
+    pub(crate) base_dir: Cow<'static, Path>,
+    pub(crate) base_name: PathBuf,
+    pub(crate) ext: Cow<'static, OsStr>,
 }
 
 /// Iterator over the list of .do files needed to build a given path.

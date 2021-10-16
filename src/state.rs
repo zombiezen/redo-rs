@@ -399,7 +399,7 @@ impl File {
 
     pub(crate) fn from_id(ptx: &mut ProcessTransaction, id: i64) -> Result<File, Error> {
         let mut q = String::from(FILE_QUERY_PREFIX);
-        q.push_str("where id=?");
+        q.push_str("where rowid=?");
         Ok(ptx.state().db.query_row(q.as_str(), params!(id), |row| {
             File::from_cols(&ptx.state().env, row)
         })?)

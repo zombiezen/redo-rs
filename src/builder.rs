@@ -308,17 +308,11 @@ impl BuildJob {
             if ps.env().verbose != 0 || ps.env().xtrace != 0 {
                 // TODO(someday): logs.write
             }
-            let _ = unistd::execvp(
-                CString::new(Vec::from_iter(OsBytes::new(&argv[0])))
-                    .unwrap()
-                    .as_c_str(),
-                Vec::from_iter(
-                    argv.iter()
-                        .skip(1)
-                        .map(|s| CString::new(Vec::from_iter(OsBytes::new(s))).unwrap()),
-                )
-                .as_slice(),
+            let argv = Vec::from_iter(
+                argv.iter()
+                    .map(|s| CString::new(Vec::from_iter(OsBytes::new(s))).unwrap()),
             );
+            let _ = unistd::execvp(argv[0].as_c_str(), argv.as_slice());
             // Returns only if execvp failed.
             1
         })?;

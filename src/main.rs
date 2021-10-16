@@ -75,7 +75,7 @@ fn run() -> Result<(), Error> {
     }
     let mut server = jobserver::JobServer::setup(1)?;
     assert!(ps.is_flushed());
-    let build_result = server.block_on(builder::run(&mut ps, &mut server.starter(), &targets));
+    let build_result = server.block_on(builder::run(&mut ps, &mut server.handle(), &targets));
     assert!(ps.is_flushed());
     let return_tokens_result = server.force_return_tokens();
     let log_reader_result = if ps.is_toplevel() {

@@ -48,7 +48,7 @@ pub(crate) struct ProcessState {
 
 #[derive(Debug)]
 pub(crate) struct ProcessTransaction<'a> {
-    state: &'a mut ProcessState,
+    state: Option<&'a mut ProcessState>,
     drop_behavior: DropBehavior,
 }
 
@@ -224,7 +224,7 @@ impl<'a> ProcessTransaction<'a> {
             .db
             .execute_batch(query)
             .map(move |_| ProcessTransaction {
-                state,
+                state: Some(state),
                 drop_behavior: DropBehavior::Rollback,
             })
     }
@@ -235,38 +235,51 @@ impl<'a> ProcessTransaction<'a> {
     }
 
     #[inline]
-    pub(crate) fn finish(mut self) -> rusqlite::Result<()> {
+    pub(crate) fn finish(mut self) -> rusqlite::Result<&'a mut ProcessState> {
         self.finish_()
     }
 
     #[inline]
-    pub(crate) fn commit(mut self) -> rusqlite::Result<()> {
+    pub(crate) fn commit(mut self) -> rusqlite::Result<&'a mut ProcessState> {
         self.drop_behavior = DropBehavior::Commit;
         self.finish()
     }
 
     #[inline]
     pub(crate) fn state(&self) -> &ProcessState {
-        self.state
+        *self.state.as_ref().unwrap()
     }
 
-    fn finish_(&mut self) -> rusqlite::Result<()> {
+    fn write<P>(&mut self, sql: &str, params: P) -> rusqlite::Result<usize>
+    where
+        P: IntoIterator,
+        P::Item: ToSql,
+    {
+        let state = self.state.take().unwrap();
+        let result = state.write(sql, params);
+        self.state = Some(state);
+        result
+    }
+
+    fn finish_(&mut self) -> rusqlite::Result<&'a mut ProcessState> {
+        let state = self.state.take().unwrap();
         match self.drop_behavior {
-            DropBehavior::Ignore => Ok(()),
-            DropBehavior::Commit => match self.state.db.execute_batch("COMMIT") {
+            DropBehavior::Ignore => Ok(state),
+            DropBehavior::Commit => match state.db.execute_batch("COMMIT") {
                 Ok(()) => {
-                    self.state.wrote = 0;
-                    Ok(())
+                    state.wrote = 0;
+                    Ok(state)
                 }
                 Err(e) => {
-                    let _ = self.state.db.execute_batch("ROLLBACK");
-                    self.state.wrote = 0;
+                    let _ = state.db.execute_batch("ROLLBACK");
+                    state.wrote = 0;
                     Err(e)
                 }
             },
             DropBehavior::Rollback => {
-                self.state.wrote = 0;
-                self.state.db.execute_batch("ROLLBACK")
+                state.wrote = 0;
+                state.db.execute_batch("ROLLBACK")?;
+                Ok(state)
             }
             DropBehavior::Panic => panic!("ProcessTransaction dropped"),
         }
@@ -338,23 +351,23 @@ impl File {
             Cow::Borrowed(&ALWAYS)
         } else {
             Cow::Owned(
-                relpath(name, &ptx.state.env.base)?
+                relpath(name, &ptx.state().env.base)?
                     .to_string_lossy()
                     .into_owned(),
             )
         };
         match ptx
-            .state
+            .state()
             .db
             .query_row(q.as_str(), params!(&normalized_name), |row| {
-                File::from_cols(&ptx.state.env, row)
+                File::from_cols(&ptx.state().env, row)
             }) {
             Ok(f) => Ok(f),
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 if !allow_add {
                     return Err(format_err!("no file with name={:?}", normalized_name));
                 }
-                match ptx.state.write(
+                match ptx.write(
                     "insert into Files (name) values (?)",
                     params!(normalized_name),
                 ) {
@@ -374,10 +387,10 @@ impl File {
                     }
                 }
                 Ok(ptx
-                    .state
+                    .state()
                     .db
                     .query_row(q.as_str(), params!(&normalized_name), |row| {
-                        File::from_cols(&ptx.state.env, row)
+                        File::from_cols(&ptx.state().env, row)
                     })?)
             }
             Err(e) => Err(e.into()),
@@ -387,8 +400,8 @@ impl File {
     pub(crate) fn from_id(ptx: &mut ProcessTransaction, id: i64) -> Result<File, Error> {
         let mut q = String::from(FILE_QUERY_PREFIX);
         q.push_str("where id=?");
-        Ok(ptx.state.db.query_row(q.as_str(), params!(id), |row| {
-            File::from_cols(&ptx.state.env, row)
+        Ok(ptx.state().db.query_row(q.as_str(), params!(id), |row| {
+            File::from_cols(&ptx.state().env, row)
         })?)
     }
 
@@ -426,7 +439,7 @@ impl File {
     }
 
     pub(crate) fn save(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
-        ptx.state.write(
+        ptx.write(
             "update Files set is_generated=?, \
                               is_override=?, \
                               checked_runid=?, \
@@ -452,7 +465,7 @@ impl File {
         self.checked_runid = v.runid;
     }
 
-    fn set_changed(&mut self, v: &Env) {
+    pub(crate) fn set_changed(&mut self, v: &Env) {
         self.changed_runid = v.runid;
         self.failed_runid = None;
         self.is_override = false;
@@ -490,7 +503,7 @@ impl File {
         Ok(())
     }
 
-    fn update_stamp(&mut self, v: &Env, must_exist: bool) -> Result<(), Error> {
+    pub(crate) fn update_stamp(&mut self, v: &Env, must_exist: bool) -> Result<(), Error> {
         let newstamp = self.read_stamp(v)?;
         if must_exist && newstamp.is_missing() {
             return Err(format_err!("{:?} does not exist", self.name));
@@ -533,21 +546,21 @@ impl File {
         self.is_source(v).map(|b| !b)
     }
 
-    fn is_checked(&self, v: &Env) -> bool {
+    pub(crate) fn is_checked(&self, v: &Env) -> bool {
         match self.checked_runid {
             Some(checked_runid) => checked_runid != 0 && checked_runid >= v.runid.unwrap(),
             None => false,
         }
     }
 
-    fn is_changed(&self, v: &Env) -> bool {
+    pub(crate) fn is_changed(&self, v: &Env) -> bool {
         match self.changed_runid {
             Some(changed_runid) => changed_runid != 0 && changed_runid >= v.runid.unwrap(),
             None => false,
         }
     }
 
-    fn is_failed(&self, v: &Env) -> bool {
+    pub(crate) fn is_failed(&self, v: &Env) -> bool {
         match self.failed_runid {
             Some(failed_runid) => failed_runid != 0 && failed_runid >= v.runid.unwrap(),
             None => false,
@@ -560,7 +573,7 @@ impl File {
     /// delete them right away, because if the build fails, we still want to
     /// know the old deps.
     pub(crate) fn zap_deps1(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
-        ptx.state.write(
+        ptx.write(
             "update Deps set delete_me=? where target=?",
             params!(true, self.id),
         )?;
@@ -572,7 +585,7 @@ impl File {
     /// Dependencies of a given target can change from one build to the next.
     /// We forget old dependencies only after a build completes successfully.
     pub(crate) fn zap_deps2(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
-        ptx.state.write(
+        ptx.write(
             "delete from Deps where target=? and delete_me=1",
             params!(self.id),
         )?;
@@ -587,7 +600,7 @@ impl File {
     ) -> Result<(), Error> {
         let src = File::from_name(ptx, dep, true)?;
         assert_ne!(self.id, src.id);
-        ptx.state.write(
+        ptx.write(
             "insert or replace into Deps (target, mode, source, delete_me) values (?,?,?,?)",
             params!(self.id, mode, src.id, false),
         )?;
@@ -881,7 +894,7 @@ pub(crate) struct Lock {
 }
 
 impl Lock {
-    pub(crate) fn new(manager: Rc<LockManager>, fid: i32) -> Lock {
+    fn new(manager: Rc<LockManager>, fid: i32) -> Lock {
         {
             let mut locks = manager.locks.borrow_mut();
             assert!(locks.insert(fid));
@@ -977,7 +990,7 @@ fn fid_flock(typ: c_int, fid: i32) -> flock {
 }
 
 /// Given a relative or absolute path `t`, express it relative to `base`.
-fn relpath<P1: AsRef<Path>, P2: AsRef<Path>>(t: P1, base: P2) -> io::Result<PathBuf> {
+pub(crate) fn relpath<P1: AsRef<Path>, P2: AsRef<Path>>(t: P1, base: P2) -> io::Result<PathBuf> {
     let t = t.as_ref();
     // TODO(maybe): Memoize cwd
     let cwd = std::env::current_dir()?;

@@ -131,8 +131,7 @@ struct JobState {
 
 #[derive(Debug)]
 pub(crate) struct JobServer {
-    token_fds: (RawFd, RawFd),
-    cheat_fds: (RawFd, RawFd),
+    params: Rc<ServerParams>,
     state: Rc<RefCell<ServerState>>,
 }
 
@@ -197,9 +196,12 @@ impl JobServer {
         state.release_except_mine(token_fds)?;
         let state = Rc::new(RefCell::new(state));
         let server = JobServer {
+            params: Rc::new(ServerParams {
+                token_fds,
+                cheat_fds,
+                top_level: realmax,
+            }),
             state,
-            token_fds,
-            cheat_fds,
         };
         env::set_var(
             MAKEFLAGS_VAR,
@@ -212,9 +214,9 @@ impl JobServer {
     }
 
     /// Get a clonable handle to the server.
-    pub(crate) fn starter(&self) -> JobStarter {
-        JobStarter {
-            token_fds: self.token_fds,
+    pub(crate) fn handle(&self) -> JobServerHandle {
+        JobServerHandle {
+            params: self.params.clone(),
             state: self.state.clone(),
         }
     }
@@ -256,7 +258,7 @@ impl JobServer {
                         rfds.insert(k);
                     }
                     if !state.token_wakers.is_empty() {
-                        rfds.insert(self.token_fds.0);
+                        rfds.insert(self.params.token_fds.0);
                     }
                     let next_timer_duration = state.timers.front().map(|&(fire, _)| fire - now);
                     if rfds.highest().is_none() {
@@ -272,7 +274,7 @@ impl JobServer {
                     select::select(None, Some(&mut rfds), None, None, max_delay.as_mut())?;
 
                     for fd in rfds.fds(None) {
-                        if fd == self.token_fds.0 {
+                        if fd == self.params.token_fds.0 {
                             if let Some(w) = state.token_wakers.pop_front() {
                                 state.token_ready = true;
                                 w.wake();
@@ -284,7 +286,7 @@ impl JobServer {
                         // die abnormally.  Since a child has died, that means a token has
                         // 'disappeared' and we now need to recreate it.
                         let mut b: [u8; 1] = [0];
-                        match try_read(self.cheat_fds.0, &mut b) {
+                        match try_read(self.params.cheat_fds.0, &mut b) {
                             Ok(Some(1)) => {
                                 // someone exited with _cheats > 0, so we need to compensate
                                 // by *not* re-creating a token now.
@@ -292,7 +294,7 @@ impl JobServer {
                             Ok(None) | Ok(Some(0)) => {
                                 state.create_tokens(1);
                                 if state.has_token() {
-                                    state.release_except_mine(self.token_fds)?;
+                                    state.release_except_mine(self.params.token_fds)?;
                                 }
                             }
                             Err(e) => return Err(e.into()),
@@ -332,7 +334,7 @@ impl JobServer {
         state.wait_fds.clear();
         state.create_tokens(n as i32);
         if state.has_token() {
-            state.release_except_mine(self.token_fds)?;
+            state.release_except_mine(self.params.token_fds)?;
             assert_eq!(state.my_tokens, 1);
         }
         assert!(
@@ -349,7 +351,7 @@ impl JobServer {
         if state.cheats > 0 {
             let cheats = state.cheats;
             state.destroy_tokens(cheats);
-            write_tokens(self.cheat_fds.1, state.cheats as usize)?;
+            write_tokens(self.params.cheat_fds.1, state.cheats as usize)?;
         }
         Ok(())
     }
@@ -361,6 +363,15 @@ impl Drop for JobServer {
     }
 }
 
+/// Immutable information about a `JobServer`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ServerParams {
+    token_fds: (RawFd, RawFd),
+    cheat_fds: (RawFd, RawFd),
+    top_level: i32,
+}
+
+/// Mutable information about a `JobServer`.
 #[derive(Debug, Default)]
 struct ServerState {
     my_tokens: i32,
@@ -431,19 +442,29 @@ impl ServerState {
         assert!(self.my_tokens > 0);
         self.release(token_fds, self.my_tokens - 1)
     }
+
+    fn release_mine(&mut self, token_fds: (RawFd, RawFd)) -> nix::Result<()> {
+        assert!(self.my_tokens >= 1);
+        self.release(token_fds, 1)
+    }
 }
 
-/// A cloneable handle to JobServer that starts jobs.
+/// A cloneable handle to `JobServer` that starts jobs.
 #[derive(Clone, Debug)]
-pub(crate) struct JobStarter {
-    token_fds: (RawFd, RawFd),
+pub(crate) struct JobServerHandle {
+    params: Rc<ServerParams>,
     state: Rc<RefCell<ServerState>>,
 }
 
-impl JobStarter {
+impl JobServerHandle {
     #[inline]
     pub(crate) fn has_token(&self) -> bool {
         self.state.borrow().has_token()
+    }
+
+    #[inline]
+    pub(crate) fn is_running(&self) -> bool {
+        self.state.borrow().is_running()
     }
 
     /// Start a new job.
@@ -530,7 +551,7 @@ impl JobStarter {
                 debug_assert!(state.my_tokens < 1);
             }
             let mut b: [u8; 1] = [0];
-            match try_read(self.token_fds.0, &mut b)? {
+            match try_read(self.params.token_fds.0, &mut b)? {
                 Some(0) => {
                     return Err(format_err!("unexpected EOF on token read"));
                 }
@@ -619,10 +640,25 @@ impl JobStarter {
         }
         Ok(())
     }
+
+    /// Return a future that complets when all running jobs are finished.
+    pub(crate) fn wait_all(&self) -> AllJobsDone {
+        AllJobsDone {
+            params: self.params.clone(),
+            done: false,
+            state: self.state.clone(),
+        }
+    }
+
+    pub(crate) fn release_mine(&self) -> Result<(), Error> {
+        let mut state = self.state.borrow_mut();
+        state.release_mine(self.params.token_fds)?;
+        Ok(())
+    }
 }
 
-/// A simple timer created by `JobStarter.sleep`.
-#[derive(Clone, Debug)]
+/// A simple timer created by `JobServerHandle.sleep`.
+#[derive(Debug)]
 pub(crate) struct Sleep {
     end: Instant,
     done: bool,
@@ -651,6 +687,120 @@ impl Future for Sleep {
 impl FusedFuture for Sleep {
     fn is_terminated(&self) -> bool {
         self.done
+    }
+}
+
+impl Clone for Sleep {
+    fn clone(&self) -> Sleep {
+        Sleep {
+            end: self.end,
+            done: false,
+            state: self.state.clone(),
+        }
+    }
+}
+
+/// A future that waits for all jobs in a `JobServer` to finish.
+#[derive(Debug)]
+pub(crate) struct AllJobsDone {
+    params: Rc<ServerParams>,
+    done: bool,
+    state: Rc<RefCell<ServerState>>,
+}
+
+impl Future for AllJobsDone {
+    type Output = Result<(), Error>;
+
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        if self.done {
+            return Poll::Ready(Err(format_err!(
+                "AllJobsDone::poll called on finished future"
+            )));
+        }
+        while self.state.borrow().my_tokens >= 2 {
+            let res = {
+                let mut state = self.state.borrow_mut();
+                state.release(self.params.token_fds, 1)
+            };
+            if let Err(e) = res {
+                self.done = true;
+                return Poll::Ready(Err(e.into()));
+            }
+        }
+        if !self.state.borrow().is_running() {
+            self.done = true;
+            if self.params.top_level != 0 {
+                // If we're the toplevel and we're sure no child processes remain,
+                // then we know we're totally idle.  Self-test to ensure no tokens
+                // mysteriously got created/destroyed.
+                if self.state.borrow().my_tokens >= 1 {
+                    let res = self.state.borrow_mut().release_mine(self.params.token_fds);
+                    if let Err(e) = res {
+                        return Poll::Ready(Err(e.into()));
+                    }
+                }
+                let mut tokens_buf = [0u8; 8192];
+                let tokens = match try_read(self.params.token_fds.0, &mut tokens_buf) {
+                    Ok(None) => 0,
+                    Ok(Some(n)) => n,
+                    Err(e) => {
+                        return Poll::Ready(Err(e.into()));
+                    }
+                };
+                let mut cheats_buf = [0u8; 8192];
+                let cheats = match try_read(self.params.cheat_fds.0, &mut cheats_buf) {
+                    Ok(None) => 0,
+                    Ok(Some(n)) => n,
+                    Err(e) => {
+                        return Poll::Ready(Err(e.into()));
+                    }
+                };
+                if (tokens - cheats) as i32 != self.params.top_level {
+                    return Poll::Ready(Err(format_err!(
+                        "on exit: expected {} tokens; found {}-{}",
+                        self.params.top_level,
+                        tokens,
+                        cheats
+                    )));
+                }
+                // TODO(someday): Retry if interrupted or short write.
+                if let Err(e) = unistd::write(self.params.token_fds.1, &tokens_buf[..tokens]) {
+                    return Poll::Ready(Err(e.into()));
+                }
+            }
+            // note: when we return, we may have *no* tokens, not even our own!
+            // If caller wants to continue, they might have to obtain one first.
+            return Poll::Ready(Ok(()));
+        }
+        // We should only release our last token if we have remaining
+        // children.  A terminating redo process should try to terminate while
+        // holding a token, and if we have no children left, we might be
+        // about to terminate.
+        if self.state.borrow().my_tokens >= 1 {
+            self.done = true;
+            let res = self.state.borrow_mut().release_mine(self.params.token_fds);
+            if let Err(e) = res {
+                return Poll::Ready(Err(e.into()));
+            }
+        }
+        // TODO(someday): Store waker
+        Poll::Pending
+    }
+}
+
+impl FusedFuture for AllJobsDone {
+    fn is_terminated(&self) -> bool {
+        self.done
+    }
+}
+
+impl Clone for AllJobsDone {
+    fn clone(&self) -> AllJobsDone {
+        AllJobsDone {
+            params: self.params.clone(),
+            done: false,
+            state: self.state.clone(),
+        }
     }
 }
 
@@ -750,7 +900,7 @@ mod tests {
     #[test]
     fn start_job() {
         let mut server = JobServer::setup(1).unwrap();
-        let job = server.starter().start(|| 4).unwrap();
+        let job = server.handle().start(|| 4).unwrap();
         let rv = server
             .block_on(async { Result::<_, Error>::Ok(job.await) })
             .unwrap();
@@ -762,7 +912,7 @@ mod tests {
         let mut server = JobServer::setup(1).unwrap();
         let start = Instant::now();
         const SLEEP_DURATION: Duration = Duration::from_millis(100);
-        let timer = server.starter().sleep(SLEEP_DURATION);
+        let timer = server.handle().sleep(SLEEP_DURATION);
         let awake = server
             .block_on(async { Result::<_, Error>::Ok(timer.await) })
             .unwrap();
@@ -781,13 +931,13 @@ mod tests {
         let start = Instant::now();
         const SLEEP_DURATION: Duration = Duration::from_millis(100);
         let job = server
-            .starter()
+            .handle()
             .start(|| {
                 thread::sleep(SLEEP_DURATION + SLEEP_DURATION);
                 4
             })
             .unwrap();
-        let timer = server.starter().sleep(SLEEP_DURATION);
+        let timer = server.handle().sleep(SLEEP_DURATION);
         let (rv, awake) = server
             .block_on(async { Result::<_, Error>::Ok(future::join(job, timer).await) })
             .unwrap();

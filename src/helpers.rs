@@ -269,13 +269,13 @@ pub(crate) fn normpath<'a, P: AsRef<Path> + ?Sized>(p: &'a P) -> Cow<'a, Path> {
 #[cfg(unix)]
 #[derive(Clone, Debug)]
 #[repr(transparent)]
-struct OsBytes<'a> {
+pub(crate) struct OsBytes<'a> {
     s: &'a OsStr,
 }
 
 #[cfg(unix)]
 impl<'a> OsBytes<'a> {
-    fn new<S: AsRef<OsStr> + ?Sized>(s: &'a S) -> OsBytes<'a> {
+    pub(crate) fn new<S: AsRef<OsStr> + ?Sized>(s: &'a S) -> OsBytes<'a> {
         OsBytes { s: s.as_ref() }
     }
 

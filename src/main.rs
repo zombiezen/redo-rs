@@ -22,7 +22,22 @@ fn main() {
                     .unwrap_or_else(|| String::from("redo")),
                 Err(_) => String::from("redo"),
             };
-            eprintln!("{}: {}", name, e);
+            if let Some(bt) = e
+                .iter_chain()
+                .filter_map(|f| f.backtrace().filter(|bt| !bt.is_empty()))
+                .last()
+            {
+                eprint!("Backtrace:\n{}\n\n", bt);
+            }
+            let msg = e.iter_chain().fold(String::new(), |mut s, e| {
+                use std::fmt::Write;
+                if !s.is_empty() {
+                    write!(s, ": ").unwrap();
+                }
+                write!(s, "{}", e).unwrap();
+                s
+            });
+            eprintln!("{}: {}", name, msg);
             let retcode = e
                 .downcast_ref::<builder::BuildError>()
                 .map(|be| i32::from(be.kind()))

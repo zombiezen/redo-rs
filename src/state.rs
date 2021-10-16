@@ -290,7 +290,9 @@ impl<'a> ProcessTransaction<'a> {
 impl<'a> Drop for ProcessTransaction<'a> {
     #[inline]
     fn drop(&mut self) {
-        let _ = self.finish_();
+        if self.state.is_some() {
+            let _ = self.finish_();
+        }
     }
 }
 

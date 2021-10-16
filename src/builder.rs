@@ -1,4 +1,4 @@
-use failure::{Backtrace, Context, Error, Fail, ResultExt};
+use failure::{format_err, Backtrace, Context, Error, Fail, ResultExt};
 use futures::future::FusedFuture;
 use futures::stream::{FusedStream, FuturesUnordered, Stream};
 use futures::{pin_mut, select};
@@ -29,7 +29,7 @@ use tempfile;
 
 use super::env::Env;
 use super::helpers::{self, OsBytes};
-use super::jobserver::{Job, JobServerHandle};
+use super::jobserver::JobServerHandle;
 use super::paths;
 use super::state::{self, Lock, LockType, ProcessState, ProcessTransaction, Stamp};
 
@@ -71,21 +71,28 @@ impl BuildJob {
     const INTERNAL_ERROR_EXIT: i32 = 209;
 
     /// Actually start running this job in a subproc, if needed.
-    fn start(
+    ///
+    /// `ps_ref` must be the same state as in `ptx`. `ps_ref` is mutably borrowed
+    /// during the future's execution.
+    fn start<'a>(
         mut self,
+        ps_ref: Rc<RefCell<&'a mut ProcessState>>,
         ptx: ProcessTransaction<'_>,
         server: &JobServerHandle,
-    ) -> Result<Pin<Box<dyn Future<Output = i32>>>, Error> {
+    ) -> Result<Pin<Box<dyn Future<Output = i32> + 'a>>, Error> {
         let before_t = try_stat(&self.t)?;
         debug_assert!(self.lock.is_owned());
-        let (is_target, dirty) = (self.should_build_func.take().unwrap())(&self.t)?;
+        let (is_target, dirty) = (self
+            .should_build_func
+            .take()
+            .unwrap_or(Box::new(|_| Ok((true, true)))))(&self.t)?;
         if !dirty {
             // Target doesn't need to be built; skip the whole task.
             // TODO(soon): If is_target, meta unchanged.
             return Ok(Box::pin(future::ready(0)));
         }
         if ptx.state().env().no_oob || dirty {
-            self.start_self(ptx, server, before_t)
+            self.start_self(ps_ref, ptx, server, before_t)
         } else {
             //self.start_deps_unlocked(dirty)
             unimplemented!()
@@ -93,12 +100,13 @@ impl BuildJob {
     }
 
     /// Run `JobServer::start` to build this object's target file.
-    fn start_self(
+    fn start_self<'a>(
         self,
+        ps_ref: Rc<RefCell<&'a mut ProcessState>>,
         mut ptx: ProcessTransaction<'_>,
         server: &JobServerHandle,
         before_t: Option<Metadata>,
-    ) -> Result<Pin<Box<dyn Future<Output = i32>>>, Error> {
+    ) -> Result<Pin<Box<dyn Future<Output = i32> + 'a>>, Error> {
         use std::os::unix::io::AsRawFd;
 
         debug_assert!(self.lock.is_owned());
@@ -317,14 +325,18 @@ impl BuildJob {
         let out_file = out_file.take().unwrap();
         Ok(Box::pin(async move {
             let mut rv = job.await;
-            let ptx = match ProcessTransaction::new(ps, TransactionBehavior::Deferred) {
+            let mut ps = ps_ref.borrow_mut();
+            let mut ptx = match ProcessTransaction::new(*ps, TransactionBehavior::Deferred) {
                 Ok(ptx) => ptx,
                 Err(_) => return BuildJob::INTERNAL_ERROR_EXIT,
             };
             rv = BuildJob::record_new_state(
                 &mut ptx, &t, sf, &before_t, out_file, &tmp_name, &argv, rv,
             );
-            ptx.commit();
+            if let Err(e) = ptx.commit() {
+                eprintln!("{:?}: {}", &t, e);
+                return BuildJob::INTERNAL_ERROR_EXIT;
+            }
             rv
         }))
     }
@@ -339,7 +351,7 @@ impl BuildJob {
     fn record_new_state<A: AsRef<OsStr>>(
         ptx: &mut ProcessTransaction<'_>,
         t: &str,
-        sf: state::File,
+        mut sf: state::File,
         before_t: &Option<Metadata>,
         mut out_file: File,
         tmp_name: &Path,
@@ -428,7 +440,10 @@ impl BuildJob {
                 // no output generated at all; that's ok
                 helpers::unlink(t).expect("failed to remove target file");
             }
-            sf.refresh(ptx);
+            if let Err(e) = sf.refresh(ptx) {
+                eprintln!("{:?}: refresh: {}", t, e);
+                rv = BuildJob::INTERNAL_ERROR_EXIT;
+            }
             sf.is_generated = true;
             sf.is_override = false;
             if sf.is_checked(ptx.state().env()) || sf.is_changed(ptx.state().env()) {
@@ -441,17 +456,29 @@ impl BuildJob {
                 );
             } else {
                 sf.csum = None;
-                sf.update_stamp(ptx.state().env(), false);
+                if let Err(e) = sf.update_stamp(ptx.state().env(), false) {
+                    eprintln!("{:?}: update stamp: {}", t, e);
+                    rv = BuildJob::INTERNAL_ERROR_EXIT;
+                }
                 sf.set_changed(ptx.state().env());
             }
         }
         // rv might have changed up above
         if rv != 0 {
             helpers::unlink(tmp_name).expect("failed to remove temporary output file");
-            sf.set_failed(ptx.state().env());
+            if let Err(e) = sf.set_failed(ptx.state().env()) {
+                eprintln!("{:?}: set failed: {}", t, e);
+                rv = BuildJob::INTERNAL_ERROR_EXIT;
+            }
         }
-        sf.zap_deps2(ptx);
-        sf.save(ptx);
+        if let Err(e) = sf.zap_deps2(ptx) {
+            eprintln!("{:?}: zap_deps2: {}", t, e);
+            rv = BuildJob::INTERNAL_ERROR_EXIT;
+        }
+        if let Err(e) = sf.save(ptx) {
+            eprintln!("{:?}: set failed: {}", t, e);
+            rv = BuildJob::INTERNAL_ERROR_EXIT;
+        }
         rv
     }
 }
@@ -490,7 +517,7 @@ pub(crate) async fn run<S: AsRef<str>>(
             None
         };
 
-    let mut result: Cell<Result<(), BuildError>> = Cell::new(Ok(()));
+    let result: Cell<Result<(), BuildError>> = Cell::new(Ok(()));
     let mut locked: VecDeque<(i64, &str)> = VecDeque::new();
     let mut cheat = || -> Result<i32, Error> {
         let selflock = match &mut me {
@@ -511,6 +538,7 @@ pub(crate) async fn run<S: AsRef<str>>(
     };
     // In the first cycle, we just build as much as we can without worrying
     // about any lock contention.  If someone else has it locked, we move on.
+    let ps_ref = Rc::new(RefCell::new(ps));
     let job_futures: FuturesUnordered<Pin<Box<dyn Future<Output = ()>>>> = FuturesUnordered::new();
     pin_mut!(job_futures);
     {
@@ -521,7 +549,7 @@ pub(crate) async fn run<S: AsRef<str>>(
                 result.set(Err(BuildErrorKind::InvalidTarget(t.into()).into()));
                 break;
             }
-            assert!(ps.is_flushed());
+            assert!(ps_ref.borrow().is_flushed());
             if seen.contains(t) {
                 continue;
             }
@@ -538,12 +566,13 @@ pub(crate) async fn run<S: AsRef<str>>(
                 result.set(r);
                 errored
             };
-            if errored && !ps.env().keep_going {
+            if errored && !ps_ref.borrow().env().keep_going {
                 break;
             }
             // TODO(soon): state.check_sane.
             {
-                let mut ptx = ProcessTransaction::new(ps, TransactionBehavior::Deferred)
+                let mut ps = ps_ref.borrow_mut();
+                let mut ptx = ProcessTransaction::new(*ps, TransactionBehavior::Deferred)
                     .context(BuildErrorKind::Generic)?;
                 ptx.set_drop_behavior(DropBehavior::Commit);
                 let mut f =
@@ -570,17 +599,21 @@ pub(crate) async fn run<S: AsRef<str>>(
                         lock,
                         should_build_func: None,
                     }
-                    .start(ptx, server)
+                    .start(ps_ref.clone(), ptx, server)
                     .context(BuildErrorKind::Generic)?;
-                    job_futures.push(Box::pin(async {
+                    let t = t.to_string();
+                    let result = &result;
+                    job_futures.push(Box::pin(async move {
                         let rv = job.await;
                         if rv != 0 {
-                            result.set(Err(BuildErrorKind::Generic.into()));
+                            result.set(Err(format_err!("{:?}: exit code {}", t, rv)
+                                .context(BuildErrorKind::Generic)
+                                .into()));
                         }
                     }));
                 }
             }
-            assert!(ps.is_flushed());
+            assert!(ps_ref.borrow().is_flushed());
         }
     }
 
@@ -603,12 +636,14 @@ pub(crate) async fn run<S: AsRef<str>>(
             result.set(r);
             errored
         };
-        if errored && !ps.env().keep_going {
+        if errored && !ps_ref.borrow().env().keep_going {
             break;
         }
         if let Some((fid, t)) = locked.pop_front() {
             // TODO(soon): check_sane
-            let mut lock = ps.new_lock(i32::try_from(fid).context(BuildErrorKind::Generic)?);
+            let mut lock = ps_ref
+                .borrow()
+                .new_lock(i32::try_from(fid).context(BuildErrorKind::Generic)?);
             let mut backoff = Duration::from_millis(100);
             lock.try_lock().context(BuildErrorKind::Generic)?;
             while !lock.is_owned() {
@@ -642,7 +677,8 @@ pub(crate) async fn run<S: AsRef<str>>(
                 lock.try_lock().context(BuildErrorKind::Generic)?;
             }
             {
-                let mut ptx = ProcessTransaction::new(ps, TransactionBehavior::Deferred)
+                let mut ps = ps_ref.borrow_mut();
+                let mut ptx = ProcessTransaction::new(*ps, TransactionBehavior::Deferred)
                     .context(BuildErrorKind::Generic)?;
                 ptx.set_drop_behavior(DropBehavior::Commit);
                 let file =
@@ -661,7 +697,7 @@ pub(crate) async fn run<S: AsRef<str>>(
                         lock,
                         should_build_func: None,
                     }
-                    .start(ptx, server)
+                    .start(ps_ref.clone(), ptx, server)
                     .context(BuildErrorKind::Generic)?;
                     job_futures.push(Box::pin(async {
                         let rv = job.await;

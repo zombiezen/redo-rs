@@ -15,6 +15,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp;
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs::{self, Metadata, OpenOptions};
 use std::io;
 use std::mem;
@@ -1034,16 +1035,62 @@ where
     let t = t.as_ref();
     match t.parent() {
         None => Ok(Cow::Borrowed(t)),
-        Some(dname) => match t.file_name() {
-            None => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid file name",
-            )),
-            Some(fname) => {
-                let mut buf = dname.canonicalize()?;
-                buf.push(fname);
-                Ok(Cow::Owned(buf))
-            }
-        },
+        Some(dname) => {
+            let fname = t.file_name().unwrap_or(OsStr::new(".."));
+            let mut buf = dname.canonicalize().or_else(|e| match e.kind() {
+                io::ErrorKind::NotFound => Ok(helpers::normpath(dname).into_owned()),
+                _ => Err(e),
+            })?;
+            buf.push(fname);
+            Ok(Cow::Owned(buf))
+        }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    macro_rules! realdirpath_tests {
+        ($($name:ident: $value:expr,)*) => {
+            $(
+                #[test]
+                fn $name() {
+                let (t, want) = $value;
+                assert_eq!(want, realdirpath(&t).unwrap().as_os_str());
+                }
+            )*
+        }
+    }
+
+    realdirpath_tests!(
+        realdirpath_root: ("/", "/"),
+        realdirpath_top: ("/foo.txt", "/foo.txt"),
+        realdirpath_trailing_parent: ("/foo/..", "/foo/.."),
+        realdirpath_intermediate_parent: ("/foo/../bar", "/bar"),
+    );
+
+    macro_rules! relpath_tests {
+        ($($name:ident: $value:expr,)*) => {
+            $(
+                #[test]
+                fn $name() {
+                let (t, base, want) = $value;
+                assert_eq!(
+                    want,
+                    relpath(&t, &base).unwrap().as_os_str(),
+                    "t={:?}, base={:?}",
+                    t,
+                    base,
+                );
+                }
+            )*
+        }
+    }
+
+    relpath_tests!(
+        relpath_basic: ("/a/b/c", "/a", "b/c"),
+        relpath_different_root: ("/a/b/c", "/d", "../a/b/c"),
+        relpath_tricky_parents: ("/home/light/src/github.com/zombiezen/redo-rs/.redo/../test.redo.tmp", "/home/light/src/github.com/zombiezen/redo-rs/.redo/..", "test.redo.tmp"),
+    );
 }

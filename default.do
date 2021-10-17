@@ -8,6 +8,10 @@ case $1 in
     redo-always
     cargo build --bin redo-always
     ;;
+  target/debug/redo-ifchange)
+    redo-always
+    cargo build --bin redo-ifchange
+    ;;
   target/release/redo)
     redo-always
     cargo build --release --bin redo
@@ -15,6 +19,10 @@ case $1 in
   target/release/redo-always)
     redo-always
     cargo build --release --bin redo-always
+    ;;
+  target/release/redo-ifchange)
+    redo-always
+    cargo build --release --bin redo-ifchange
     ;;
   *)
     echo "no rule to build '$1'" >&2

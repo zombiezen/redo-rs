@@ -229,7 +229,7 @@ impl<'a> ProcessTransaction<'a> {
     }
 
     #[inline]
-    pub(crate) fn set_drop_behavior(&mut self, drop_behavior: DropBehavior) {
+    pub fn set_drop_behavior(&mut self, drop_behavior: DropBehavior) {
         self.drop_behavior = drop_behavior;
     }
 

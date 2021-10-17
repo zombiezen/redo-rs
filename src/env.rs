@@ -207,6 +207,11 @@ impl Env {
         &self.startdir
     }
 
+    #[inline]
+    pub fn is_unlocked(&self) -> bool {
+        self.unlocked
+    }
+
     /// If file locking is broken, update the environment accordingly.
     pub(crate) fn mark_locks_broken(&mut self) {
         env::set_var("REDO_LOCKS_BROKEN", "1");

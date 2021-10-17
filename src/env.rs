@@ -12,7 +12,8 @@ use super::helpers;
 
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub(crate) struct Env {
+pub struct Env {
+    is_toplevel: bool,
     pub(crate) base: PathBuf,
     pub(crate) pwd: PathBuf,
     pub(crate) target: PathBuf,
@@ -36,12 +37,116 @@ pub(crate) struct Env {
 }
 
 impl Env {
+    /// Start a session (if needed) for a command that does need the state db.
+    pub fn init<T: AsRef<str>>(targets: &[T]) -> Result<Env, Error> {
+        let mut is_toplevel = false;
+        if !get_bool("REDO") {
+            is_toplevel = true;
+            let exe_path = env::current_exe()?;
+            let exe_names = [&exe_path, &fs::canonicalize(&exe_path)?];
+            let dir_names: Vec<&Path> = exe_names.iter().filter_map(|&p| p.parent()).collect();
+            let mut try_names: Vec<Cow<Path>> = Vec::new();
+            try_names.extend(dir_names.iter().map(|&p| {
+                let mut p2 = PathBuf::from(p);
+                p2.extend(["..", "lib", "redo"].iter());
+                Cow::Owned(p2)
+            }));
+            try_names.extend(dir_names.iter().map(|&p| {
+                let mut p2 = PathBuf::from(p);
+                p2.extend(["..", "redo"].iter());
+                Cow::Owned(p2)
+            }));
+            try_names.extend(dir_names.iter().map(|&p| Cow::Borrowed(p)));
+
+            let mut dirs: Vec<Cow<Path>> = Vec::new();
+            for k in try_names {
+                if !dirs.iter().any(|k2| k2 == &k) {
+                    dirs.push(k);
+                }
+            }
+            let old_path = env::var_os("PATH").unwrap_or_default();
+            let mut new_path = OsString::new();
+            for p in dirs {
+                new_path.push(p.as_os_str());
+                new_path.push(":");
+            }
+            new_path.push(old_path);
+            env::set_var("PATH", new_path);
+            env::set_var("REDO", exe_path);
+        }
+        if !get_bool("REDO_BASE") {
+            let targets: Vec<&str> = if targets.is_empty() {
+                // If no other targets given, assume the current directory.
+                vec!["all"]
+            } else {
+                targets.iter().map(AsRef::as_ref).collect()
+            };
+            let cwd = env::current_dir()?;
+            let maybe_dirs: Vec<Option<PathBuf>> = targets
+                .iter()
+                .map(|t| {
+                    Path::new(t)
+                        .parent()
+                        .map(|par| helpers::abs_path(&cwd, &par).into_owned())
+                })
+                .collect();
+            if maybe_dirs.iter().any(|o| o.is_none()) {
+                return Err(format_err!("invalid targets"));
+            }
+            let orig_base = common_path::common_path_all(
+                maybe_dirs
+                    .iter()
+                    .map(|o| o.as_ref().unwrap().as_ref())
+                    .chain(iter::once(cwd.as_ref())),
+            )
+            .unwrap();
+            let mut base = Some(orig_base.clone());
+            while let Some(mut b) = base {
+                b.push(".redo");
+                if b.exists() {
+                    base = Some(b);
+                    break;
+                }
+                b.pop(); // .redo
+                base = if b.pop() {
+                    // up to parent
+                    None
+                } else {
+                    Some(b)
+                };
+            }
+            env::set_var("REDO_BASE", base.unwrap_or(orig_base));
+            env::set_var("REDO_STARTDIR", cwd);
+        }
+        Ok(Env {
+            is_toplevel,
+            ..Env::inherit()?
+        })
+    }
+
+    /// Start a session (if needed) for a command that needs no state db.
+    pub fn init_no_state() -> Result<Env, Error> {
+        let mut is_toplevel = false;
+        if !get_bool("REDO") {
+            env::set_var("REDO", "NOT_DEFINED");
+            is_toplevel = true;
+        }
+        if !get_bool("REDO_BASE") {
+            env::set_var("REDO_BASE", "NOT_DEFINED");
+        }
+        Ok(Env {
+            is_toplevel,
+            ..Env::inherit()?
+        })
+    }
+
     /// Read environment (which must already be set) to get runtime settings.
-    pub(crate) fn inherit() -> Result<Env, Error> {
+    pub fn inherit() -> Result<Env, Error> {
         if !get_bool("REDO") {
             return Err(format_err!("must be run from inside a .do"));
         }
         let v = Env {
+            is_toplevel: false,
             base: env::var_os("REDO_BASE").unwrap_or_default().into(),
             pwd: env::var_os("REDO_PWD").unwrap_or_default().into(),
             target: env::var_os("REDO_TARGET").unwrap_or_default().into(),
@@ -72,6 +177,36 @@ impl Env {
         Ok(v)
     }
 
+    #[inline]
+    pub fn is_toplevel(&self) -> bool {
+        self.is_toplevel
+    }
+
+    #[inline]
+    pub fn pwd(&self) -> &Path {
+        &self.pwd
+    }
+
+    #[inline]
+    pub fn target(&self) -> &Path {
+        &self.target
+    }
+
+    #[inline]
+    pub fn log(&self) -> i32 {
+        self.log
+    }
+
+    #[inline]
+    pub fn locks_broken(&self) -> bool {
+        self.locks_broken
+    }
+
+    #[inline]
+    pub fn startdir(&self) -> &Path {
+        &self.startdir
+    }
+
     /// If file locking is broken, update the environment accordingly.
     pub(crate) fn mark_locks_broken(&mut self) {
         env::set_var("REDO_LOCKS_BROKEN", "1");
@@ -88,103 +223,6 @@ impl Env {
         self.runid = Some(runid);
         env::set_var("REDO_RUNID", runid.to_string());
     }
-}
-
-/// Start a session (if needed) for a command that needs no state db.
-pub(crate) fn init_no_state() -> Result<(Env, bool), Error> {
-    let mut is_toplevel = false;
-    if !get_bool("REDO") {
-        env::set_var("REDO", "NOT_DEFINED");
-        is_toplevel = true;
-    }
-    if !get_bool("REDO_BASE") {
-        env::set_var("REDO_BASE", "NOT_DEFINED");
-    }
-    Ok((Env::inherit()?, is_toplevel))
-}
-
-/// Start a session (if needed) for a command that does need the state db.
-pub(crate) fn init<T: AsRef<str>>(targets: &[T]) -> Result<(Env, bool), Error> {
-    let mut is_toplevel = false;
-    if !get_bool("REDO") {
-        is_toplevel = true;
-        let exe_path = env::current_exe()?;
-        let exe_names = [&exe_path, &fs::canonicalize(&exe_path)?];
-        let dir_names: Vec<&Path> = exe_names.iter().filter_map(|&p| p.parent()).collect();
-        let mut try_names: Vec<Cow<Path>> = Vec::new();
-        try_names.extend(dir_names.iter().map(|&p| {
-            let mut p2 = PathBuf::from(p);
-            p2.extend(["..", "lib", "redo"].iter());
-            Cow::Owned(p2)
-        }));
-        try_names.extend(dir_names.iter().map(|&p| {
-            let mut p2 = PathBuf::from(p);
-            p2.extend(["..", "redo"].iter());
-            Cow::Owned(p2)
-        }));
-        try_names.extend(dir_names.iter().map(|&p| Cow::Borrowed(p)));
-
-        let mut dirs: Vec<Cow<Path>> = Vec::new();
-        for k in try_names {
-            if !dirs.iter().any(|k2| k2 == &k) {
-                dirs.push(k);
-            }
-        }
-        let old_path = env::var_os("PATH").unwrap_or_default();
-        let mut new_path = OsString::new();
-        for p in dirs {
-            new_path.push(p.as_os_str());
-            new_path.push(":");
-        }
-        new_path.push(old_path);
-        env::set_var("PATH", new_path);
-        env::set_var("REDO", exe_path);
-    }
-    if !get_bool("REDO_BASE") {
-        let targets: Vec<&str> = if targets.is_empty() {
-            // If no other targets given, assume the current directory.
-            vec!["all"]
-        } else {
-            targets.iter().map(AsRef::as_ref).collect()
-        };
-        let cwd = env::current_dir()?;
-        let maybe_dirs: Vec<Option<PathBuf>> = targets
-            .iter()
-            .map(|t| {
-                Path::new(t)
-                    .parent()
-                    .map(|par| helpers::abs_path(&cwd, &par).into_owned())
-            })
-            .collect();
-        if maybe_dirs.iter().any(|o| o.is_none()) {
-            return Err(format_err!("invalid targets"));
-        }
-        let orig_base = common_path::common_path_all(
-            maybe_dirs
-                .iter()
-                .map(|o| o.as_ref().unwrap().as_ref())
-                .chain(iter::once(cwd.as_ref())),
-        )
-        .unwrap();
-        let mut base = Some(orig_base.clone());
-        while let Some(mut b) = base {
-            b.push(".redo");
-            if b.exists() {
-                base = Some(b);
-                break;
-            }
-            b.pop(); // .redo
-            base = if b.pop() {
-                // up to parent
-                None
-            } else {
-                Some(b)
-            };
-        }
-        env::set_var("REDO_BASE", base.unwrap_or(orig_base));
-        env::set_var("REDO_STARTDIR", cwd);
-    }
-    Ok((Env::inherit()?, is_toplevel))
 }
 
 fn get_int<K: AsRef<OsStr>>(key: K, default: i64) -> i64 {

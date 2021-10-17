@@ -4,12 +4,8 @@ use std::io;
 use std::path::Path;
 use std::process;
 
-mod builder;
-mod env;
-mod helpers;
-mod jobserver;
-mod paths;
-mod state;
+use redo::builder::{self, BuildError};
+use redo::{self, Env, JobServer, ProcessState, ProcessTransaction};
 
 fn main() {
     match run() {
@@ -39,7 +35,7 @@ fn main() {
             });
             eprintln!("{}: {}", name, msg);
             let retcode = e
-                .downcast_ref::<builder::BuildError>()
+                .downcast_ref::<BuildError>()
                 .map(|be| i32::from(be.kind()))
                 .unwrap_or(1);
             process::exit(retcode);
@@ -51,16 +47,17 @@ fn run() -> Result<(), Error> {
     use std::os::unix::io::AsRawFd;
 
     let mut targets: Vec<String> = std::env::args().skip(1).collect();
-    let mut ps = state::ProcessState::init(targets.as_slice())?;
+    let env = Env::init(targets.as_slice())?;
+    let mut ps = ProcessState::init(env)?;
     if ps.is_toplevel() && targets.is_empty() {
         targets.push(String::from("all"));
     }
     let mut j = 0; // TODO(soon): Parse -j flag.
-    if ps.is_toplevel() && (ps.env().log != 0 || j > 1) {
+    if ps.is_toplevel() && (ps.env().log() != 0 || j > 1) {
         builder::close_stdin()?;
     }
     // TODO(someday): start_stdin_log_reader or logs.setup
-    if (ps.is_toplevel() || j > 1) && ps.env().locks_broken {
+    if (ps.is_toplevel() || j > 1) && ps.env().locks_broken() {
         // TODO(soon): log as warn.
         eprintln!("detected broken fcntl locks; parallelism disabled.");
         eprintln!("  ...details: https://github.com/Microsoft/WSL/issues/1927");
@@ -70,11 +67,11 @@ fn run() -> Result<(), Error> {
     }
 
     {
-        let mut ptx = state::ProcessTransaction::new(&mut ps, TransactionBehavior::Deferred)?;
+        let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Deferred)?;
         for t in &targets {
             if Path::new(t).exists() {
-                let f = state::File::from_name(&mut ptx, t, true)?;
-                if !f.is_generated {
+                let f = redo::File::from_name(&mut ptx, t, true)?;
+                if !f.is_generated() {
                     // TODO(soon): log as warn.
                     eprintln!(
                         "{}: exists and not marked as generated; not redoing",
@@ -88,7 +85,7 @@ fn run() -> Result<(), Error> {
     if j < 0 || j > 1000 {
         return Err(format_err!("invalid --jobs value: {}", j));
     }
-    let mut server = jobserver::JobServer::setup(1)?;
+    let mut server = JobServer::setup(1)?;
     assert!(ps.is_flushed());
     let build_result = server.block_on(builder::run(&mut ps, &mut server.handle(), &targets));
     assert!(ps.is_flushed());

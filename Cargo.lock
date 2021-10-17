@@ -353,7 +353,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "redo-rs"
+name = "redo"
 version = "0.1.0"
 dependencies = [
  "common-path",

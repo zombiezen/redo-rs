@@ -130,13 +130,13 @@ struct JobState {
 }
 
 #[derive(Debug)]
-pub(crate) struct JobServer {
+pub struct JobServer {
     params: Rc<ServerParams>,
     state: Rc<RefCell<ServerState>>,
 }
 
 impl JobServer {
-    pub(crate) fn setup(max_jobs: i32) -> Result<JobServer, Error> {
+    pub fn setup(max_jobs: i32) -> Result<JobServer, Error> {
         const CHEATFDS_VAR: &str = "REDO_CHEATFDS";
         const MAKEFLAGS_VAR: &str = "MAKEFLAGS";
 
@@ -214,7 +214,7 @@ impl JobServer {
     }
 
     /// Get a clonable handle to the server.
-    pub(crate) fn handle(&self) -> JobServerHandle {
+    pub fn handle(&self) -> JobServerHandle {
         JobServerHandle {
             params: self.params.clone(),
             state: self.state.clone(),
@@ -222,7 +222,7 @@ impl JobServer {
     }
 
     /// Run all tasks in the job server to completion.
-    pub(crate) fn block_on<T, F, E>(&mut self, f: F) -> Result<T, Error>
+    pub fn block_on<T, F, E>(&mut self, f: F) -> Result<T, Error>
     where
         E: Into<Error>,
         F: Future<Output = Result<T, E>>,
@@ -328,7 +328,7 @@ impl JobServer {
     }
 
     /// Release or destroy all the tokens we own, in preparation for exit.
-    pub(crate) fn force_return_tokens(&mut self) -> Result<(), Error> {
+    pub fn force_return_tokens(&mut self) -> Result<(), Error> {
         let mut state = self.state.borrow_mut();
         let n = state.wait_fds.len();
         state.wait_fds.clear();
@@ -451,7 +451,7 @@ impl ServerState {
 
 /// A cloneable handle to `JobServer` that starts jobs.
 #[derive(Clone, Debug)]
-pub(crate) struct JobServerHandle {
+pub struct JobServerHandle {
     params: Rc<ServerParams>,
     state: Rc<RefCell<ServerState>>,
 }

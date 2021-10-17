@@ -26,36 +26,35 @@ use std::rc::Rc;
 use std::str;
 use std::time::{Duration, SystemTime};
 
-use super::env::{self, Env};
+use super::env::Env;
 use super::helpers;
 
 const SCHEMA_VER: i32 = 2;
 
 /// An invalid filename that is always marked as dirty.
-const ALWAYS: &str = "//ALWAYS";
+pub const ALWAYS: &str = "//ALWAYS";
 
 /// fid offset for "log locks".
 pub(crate) const LOG_LOCK_MAGIC: i32 = 0x10000000;
 
+/// Connection to the state database.
 #[derive(Debug)]
 #[non_exhaustive]
-pub(crate) struct ProcessState {
+pub struct ProcessState {
     db: Connection,
     lock_manager: Rc<LockManager>,
     env: Env,
-    is_toplevel: bool,
     wrote: i32,
 }
 
 #[derive(Debug)]
-pub(crate) struct ProcessTransaction<'a> {
+pub struct ProcessTransaction<'a> {
     state: Option<&'a mut ProcessState>,
     drop_behavior: DropBehavior,
 }
 
 impl ProcessState {
-    pub(crate) fn init<T: AsRef<str>>(targets: &[T]) -> Result<ProcessState, Error> {
-        let (mut e, is_toplevel) = env::init(targets)?;
+    pub fn init(mut e: Env) -> Result<ProcessState, Error> {
         let dbdir = {
             let mut dbdir = PathBuf::from(&e.base);
             dbdir.push(".redo");
@@ -74,7 +73,7 @@ impl ProcessState {
             lockfile
         };
         let lock_manager = Rc::new(LockManager::open(lockfile)?);
-        if is_toplevel && LockManager::detect_broken_locks(&lock_manager)? {
+        if e.is_toplevel() && LockManager::detect_broken_locks(&lock_manager)? {
             e.mark_locks_broken();
         }
         let dbfile = {
@@ -176,13 +175,12 @@ impl ProcessState {
             db,
             lock_manager,
             env: e,
-            is_toplevel,
             wrote: 0,
         })
     }
 
     #[inline]
-    pub(crate) fn env(&self) -> &Env {
+    pub fn env(&self) -> &Env {
         &self.env
     }
 
@@ -192,12 +190,12 @@ impl ProcessState {
     }
 
     #[inline]
-    pub(crate) fn is_toplevel(&self) -> bool {
-        self.is_toplevel
+    pub fn is_toplevel(&self) -> bool {
+        self.env.is_toplevel()
     }
 
     #[inline]
-    pub(crate) fn is_flushed(&self) -> bool {
+    pub fn is_flushed(&self) -> bool {
         self.wrote == 0
     }
 
@@ -212,7 +210,7 @@ impl ProcessState {
 }
 
 impl<'a> ProcessTransaction<'a> {
-    pub(crate) fn new(
+    pub fn new(
         state: &'a mut ProcessState,
         behavior: TransactionBehavior,
     ) -> rusqlite::Result<ProcessTransaction> {
@@ -241,13 +239,13 @@ impl<'a> ProcessTransaction<'a> {
     }
 
     #[inline]
-    pub(crate) fn commit(mut self) -> rusqlite::Result<&'a mut ProcessState> {
+    pub fn commit(mut self) -> rusqlite::Result<&'a mut ProcessState> {
         self.drop_behavior = DropBehavior::Commit;
         self.finish()
     }
 
     #[inline]
-    pub(crate) fn state(&self) -> &ProcessState {
+    pub fn state(&self) -> &ProcessState {
         *self.state.as_ref().unwrap()
     }
 
@@ -319,7 +317,7 @@ fn connect<P: AsRef<Path>>(env: &Env, dbfile: P) -> rusqlite::Result<Connection>
 /// An object representing a source or target in the redo database.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub(crate) struct File {
+pub struct File {
     pub(crate) id: i64,
     pub(crate) name: String,
     pub(crate) is_generated: bool,
@@ -343,7 +341,7 @@ const FILE_QUERY_PREFIX: &str = "select rowid, \
                               from Files ";
 
 impl File {
-    pub(crate) fn from_name(
+    pub fn from_name(
         ptx: &mut ProcessTransaction,
         name: &str,
         allow_add: bool,
@@ -436,12 +434,18 @@ impl File {
         Ok(f)
     }
 
+    #[inline]
+    pub fn is_generated(&self) -> bool {
+        self.is_generated
+    }
+
     pub(crate) fn refresh(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
         *self = File::from_id(ptx, self.id)?;
         Ok(())
     }
 
-    pub(crate) fn save(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
+    /// Write the file to the database.
+    pub fn save(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
         ptx.write(
             "update Files set is_generated=?, \
                               is_override=?, \
@@ -468,7 +472,7 @@ impl File {
         self.checked_runid = v.runid;
     }
 
-    pub(crate) fn set_changed(&mut self, v: &Env) {
+    pub fn set_changed(&mut self, v: &Env) {
         self.changed_runid = v.runid;
         self.failed_runid = None;
         self.is_override = false;
@@ -504,6 +508,11 @@ impl File {
         self.failed_runid = None;
         self.is_override = true;
         Ok(())
+    }
+
+    /// Sets the file's stamp.
+    pub fn set_stamp(&mut self, newstamp: Stamp) {
+        self.stamp = Some(newstamp);
     }
 
     pub(crate) fn update_stamp(&mut self, v: &Env, must_exist: bool) -> Result<(), Error> {
@@ -595,7 +604,8 @@ impl File {
         Ok(())
     }
 
-    pub(crate) fn add_dep(
+    /// Add a dependency and write it to the database.
+    pub fn add_dep(
         &mut self,
         ptx: &mut ProcessTransaction,
         mode: DepMode,
@@ -646,7 +656,7 @@ impl File {
         })
     }
 
-    pub(crate) fn nice_name(&self, v: &Env) -> Result<String, Error> {
+    pub fn nice_name(&self, v: &Env) -> Result<String, Error> {
         Ok(relpath(v.base.join(&self.name), &v.startdir)?
             .to_string_lossy()
             .into_owned())
@@ -656,7 +666,7 @@ impl File {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 #[non_exhaustive]
 #[repr(u8)]
-pub(crate) enum DepMode {
+pub enum DepMode {
     Created = b'c',
     Modified = b'm',
 }
@@ -721,14 +731,14 @@ impl ToSql for DepMode {
 
 /// Serialized file metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub(crate) struct Stamp(Cow<'static, str>);
+pub struct Stamp(Cow<'static, str>);
 
 impl Stamp {
     /// The stamp of a directory; mtime is unhelpful.
-    pub(crate) const DIR: Stamp = Stamp(Cow::Borrowed("dir"));
+    pub const DIR: Stamp = Stamp(Cow::Borrowed("dir"));
 
     /// The stamp of a nonexistent file.
-    pub(crate) const MISSING: Stamp = Stamp(Cow::Borrowed("0"));
+    pub const MISSING: Stamp = Stamp(Cow::Borrowed("0"));
 
     fn from_metadata(metadata: &fs::Metadata) -> Result<Stamp, Error> {
         use std::os::unix::fs::MetadataExt;

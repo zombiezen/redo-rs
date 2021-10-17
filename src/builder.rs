@@ -1,3 +1,5 @@
+//! Code for parallel-building a set of targets.
+
 use failure::{format_err, Backtrace, Context, Error, Fail, ResultExt};
 use futures::future::FusedFuture;
 use futures::stream::{FusedStream, FuturesUnordered, Stream};
@@ -33,14 +35,15 @@ use super::jobserver::JobServerHandle;
 use super::paths;
 use super::state::{self, Lock, LockType, ProcessState, ProcessTransaction, Stamp};
 
-pub(crate) fn close_stdin() -> Result<(), Error> {
+pub fn close_stdin() -> Result<(), Error> {
     use std::os::unix::io::AsRawFd;
     let f = File::open("/dev/null")?;
     unistd::dup2(f.as_raw_fd(), io::stdin().as_raw_fd())?;
     Ok(())
 }
 
-pub(crate) fn await_log_reader(env: &Env, stderr_fd: RawFd) -> Result<(), Error> {
+/// Await the redo-log instance we redirected stderr to, if any.
+pub fn await_log_reader(env: &Env, stderr_fd: RawFd) -> Result<(), Error> {
     use std::os::unix::io::AsRawFd;
     if env.log == 0 {
         return Ok(());
@@ -477,7 +480,7 @@ impl BuildJob {
     }
 }
 
-pub(crate) async fn run<S: AsRef<str>>(
+pub async fn run<S: AsRef<str>>(
     ps: &mut ProcessState,
     server: &JobServerHandle,
     targets: &[S],
@@ -739,13 +742,13 @@ fn try_stat<P: AsRef<Path>>(path: P) -> io::Result<Option<Metadata>> {
 }
 
 #[derive(Debug)]
-pub(crate) struct BuildError {
+pub struct BuildError {
     inner: Context<BuildErrorKind>,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug, Fail)]
 #[non_exhaustive]
-pub(crate) enum BuildErrorKind {
+pub enum BuildErrorKind {
     #[fail(display = "Build failed")]
     Generic,
     #[fail(display = "{:?}: failed in another thread", _0)]
@@ -756,7 +759,7 @@ pub(crate) enum BuildErrorKind {
 
 impl BuildError {
     #[inline]
-    pub(crate) fn kind(&self) -> &BuildErrorKind {
+    pub fn kind(&self) -> &BuildErrorKind {
         self.inner.get_context()
     }
 }
@@ -801,6 +804,7 @@ impl Default for BuildErrorKind {
 impl From<&BuildErrorKind> for i32 {
     fn from(kind: &BuildErrorKind) -> i32 {
         match kind {
+            BuildErrorKind::FailedInAnotherThread(_) => 2,
             BuildErrorKind::InvalidTarget(_) => 204,
             _ => 1,
         }

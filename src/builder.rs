@@ -5,62 +5,38 @@ use futures::future::FusedFuture;
 use futures::stream::{FusedStream, FuturesUnordered, Stream};
 use futures::{pin_mut, select};
 use nix::sys::signal::{self, SigHandler, Signal};
-use nix::unistd;
+use nix::sys::wait;
+use nix::unistd::{self, ForkResult, Pid};
 use rand;
 use rusqlite::{DropBehavior, TransactionBehavior};
-use std::cell::Cell;
-use std::cell::RefCell;
+use std::borrow::Cow;
+use std::cell::{Cell, RefCell};
 use std::cmp;
-use std::collections::HashSet;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::convert::TryInto;
 use std::env;
-use std::ffi::{CString, OsStr, OsString};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fmt::{self, Display};
-use std::fs::Metadata;
-use std::fs::{self, File};
+use std::fs::{self, File, Metadata};
 use std::future::{self, Future};
 use std::io::{self, BufRead, BufReader};
 use std::mem;
 use std::os::unix::io::RawFd;
+use std::panic;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process;
 use std::rc::Rc;
 use std::time::Duration;
-use tempfile;
+use tempfile::{self, Builder as TempFileBuilder};
+use zombiezen_const_cstr::const_cstr;
 
 use super::env::Env;
 use super::helpers::{self, OsBytes};
 use super::jobserver::JobServerHandle;
+use super::logs::{self, LogBuilder};
 use super::paths;
 use super::state::{self, Lock, LockType, ProcessState, ProcessTransaction, Stamp};
-
-pub fn close_stdin() -> Result<(), Error> {
-    use std::os::unix::io::AsRawFd;
-    let f = File::open("/dev/null")?;
-    unistd::dup2(f.as_raw_fd(), io::stdin().as_raw_fd())?;
-    Ok(())
-}
-
-/// Await the redo-log instance we redirected stderr to, if any.
-pub fn await_log_reader(env: &Env, stderr_fd: RawFd) -> Result<(), Error> {
-    use std::os::unix::io::AsRawFd;
-    if env.log == 0 {
-        return Ok(());
-    }
-    if false {
-        // TODO(now): Check for log reader PID and wait on it.
-
-        // never actually close fd#1 or fd#2; insanity awaits.
-        // replace it with something else instead.
-        // Since our stdout/stderr are attached to redo-log's stdin,
-        // this will notify redo-log that it's time to die (after it finishes
-        // reading the logs)
-        unistd::dup2(stderr_fd, io::stdout().as_raw_fd())?;
-        unistd::dup2(stderr_fd, io::stderr().as_raw_fd())?;
-    }
-    Ok(())
-}
 
 struct BuildJob {
     /// Original target name. (Not relative to `Env.base`).
@@ -91,7 +67,11 @@ impl BuildJob {
             .unwrap_or(Box::new(|_| Ok((true, true)))))(&self.t)?;
         if !dirty {
             // Target doesn't need to be built; skip the whole task.
-            // TODO(soon): If is_target, meta unchanged.
+            logs::meta(
+                "unchanged",
+                &state::target_relpath(ptx.state().env(), &self.t)?.to_string_lossy(),
+                None,
+            );
             return Ok(Box::pin(future::ready(0)));
         }
         if ptx.state().env().no_oob || dirty {
@@ -121,6 +101,13 @@ impl BuildJob {
             && !newstamp.is_missing()
             && (sf.is_override || Stamp::detect_override(sf.stamp.as_ref().unwrap(), &newstamp))
         {
+            let nice_t = nice(ptx.state().env(), &t)?;
+            log_warn!("{:?} - you modified it; skipping\n", nice_t);
+            if !sf.is_override {
+                log_warn!("{:?} - old: {:?}\n", &nice_t, &sf.stamp);
+                log_warn!("{:?} - old: {:?}\n", &nice_t, &newstamp);
+                sf.set_override(ptx.state().env())?;
+            }
             sf.save(&mut ptx)?;
             // Fall through and treat it the same as a static file.
         }
@@ -133,6 +120,7 @@ impl BuildJob {
             // For example, a rule called default.c.do could be used to try
             // to produce hello.c, but we don't want that to happen if
             // hello.c was created by the end user.
+            log_debug2!("-- static ({:?})\n", &t);
             if !sf.is_override {
                 sf.set_static(ptx.state().env())?;
             }
@@ -147,6 +135,7 @@ impl BuildJob {
                     sf.set_static(ptx.state().env())?;
                     0
                 } else {
+                    log_err!("no rule to redo {:?}\n", &t);
                     sf.set_failed(ptx.state().env())?;
                     1
                 };
@@ -239,7 +228,34 @@ impl BuildJob {
         // actually unlink() the file in case redo-log is about to start
         // reading a previous instance created during this session.  It
         // should always see either the old or new instance.
+        if ptx.state().env().log() != 0 {
+            let lfend = state::logname(ptx.state().env(), sf.id);
+            // Make sure the temp file is in the same directory as lfend,
+            // so we can be sure of our ability to rename it atomically later.
+            let lfd = TempFileBuilder::new()
+                .prefix("redo.")
+                .suffix(".log.tmp")
+                .tempfile_in(lfend.parent().unwrap())?;
+            lfd.persist(lfend)?;
+        }
+        let mut dof = state::File::from_name(
+            &mut ptx,
+            df.do_dir
+                .join(&df.do_file)
+                .to_str()
+                .ok_or_else(|| format_err!("invalid file name"))?,
+            true,
+        )?;
+        dof.set_static(ptx.state().env())?;
+        dof.save(&mut ptx)?;
         let ps = ptx.commit()?;
+        logs::meta(
+            "do",
+            state::target_relpath(ps.env(), &t)?
+                .to_str()
+                .ok_or_else(|| format_err!("invalid target name"))?,
+            None,
+        );
 
         // Wrap out_file in a Cell, since we drop it in the subprocess.
         // Rust can't tell that the closure is not called in the parent process.
@@ -309,7 +325,14 @@ impl BuildJob {
                 return 1;
             }
             if ps.env().verbose != 0 || ps.env().xtrace != 0 {
-                // TODO(someday): logs.write
+                let mut s = String::new();
+                s.push_str("* ");
+                s.push_str(&argv[0].to_str().unwrap().replace("\n", " "));
+                for a in &argv[1..] {
+                    s.push(' ');
+                    s.push_str(&a.to_str().unwrap().replace("\n", " "));
+                }
+                logs::write(&s);
             }
             let argv = Vec::from_iter(
                 argv.iter()
@@ -361,7 +384,6 @@ impl BuildJob {
         let after_t = try_stat(t).expect("cannot get target metadata");
         let st1 = out_file.metadata().expect("cannot get out_file metadata");
         let mut st2 = try_stat(tmp_name).expect("unexpected error when statting $3");
-        // TODO(now)
         let modified = match after_t {
             Some(after_t) => {
                 after_t.is_dir()
@@ -400,7 +422,7 @@ impl BuildJob {
                         if dnt.map_or(false, |dnt| dnt.exists()) {
                             // This could happen, so report a simple error message
                             // that gives a hint for how to fix your .do script.
-                            eprintln!(
+                            log_err!(
                                 "{:?}: target dir {:?} does not exist!",
                                 t,
                                 dnt.unwrap_or(Path::new(""))
@@ -408,7 +430,7 @@ impl BuildJob {
                         } else {
                             // This could happen for, eg. a permissions error on
                             // the target directory.
-                            eprintln!("{:?}: copy stdout: {}", t, e);
+                            log_err!("{:?}: copy stdout: {}", t, e);
                         }
                         rv = BuildJob::INTERNAL_ERROR_EXIT;
                     }
@@ -430,7 +452,7 @@ impl BuildJob {
                 if let Err(e) = fs::rename(tmp_name, t) {
                     // This could happen for, eg. a permissions error on
                     // the target directory.
-                    eprintln!("{:?}: rename {:?}: {}", t, tmp_name, e);
+                    log_err!("{:?}: rename {:?}: {}", t, tmp_name, e);
                     rv = BuildJob::INTERNAL_ERROR_EXIT;
                 }
             } else {
@@ -438,7 +460,7 @@ impl BuildJob {
                 helpers::unlink(t).expect("failed to remove target file");
             }
             if let Err(e) = sf.refresh(ptx) {
-                eprintln!("{:?}: refresh: {}", t, e);
+                log_err!("{:?}: refresh: {}", t, e);
                 rv = BuildJob::INTERNAL_ERROR_EXIT;
             }
             sf.is_generated = true;
@@ -454,7 +476,7 @@ impl BuildJob {
             } else {
                 sf.csum = None;
                 if let Err(e) = sf.update_stamp(ptx.state().env(), false) {
-                    eprintln!("{:?}: update stamp: {}", t, e);
+                    log_err!("{:?}: update stamp: {}", t, e);
                     rv = BuildJob::INTERNAL_ERROR_EXIT;
                 }
                 sf.set_changed(ptx.state().env());
@@ -464,18 +486,30 @@ impl BuildJob {
         if rv != 0 {
             helpers::unlink(tmp_name).expect("failed to remove temporary output file");
             if let Err(e) = sf.set_failed(ptx.state().env()) {
-                eprintln!("{:?}: set failed: {}", t, e);
+                log_err!("{:?}: set failed: {}", t, e);
                 rv = BuildJob::INTERNAL_ERROR_EXIT;
             }
         }
         if let Err(e) = sf.zap_deps2(ptx) {
-            eprintln!("{:?}: zap_deps2: {}", t, e);
+            log_err!("{:?}: zap_deps2: {}", t, e);
             rv = BuildJob::INTERNAL_ERROR_EXIT;
         }
         if let Err(e) = sf.save(ptx) {
-            eprintln!("{:?}: set failed: {}", t, e);
+            log_err!("{:?}: set failed: {}", t, e);
             rv = BuildJob::INTERNAL_ERROR_EXIT;
         }
+        logs::meta(
+            "done",
+            &format!(
+                "{} {}",
+                rv,
+                state::target_relpath(ptx.state().env(), &t)
+                    .expect("cannot format target as relative path")
+                    .to_str()
+                    .expect("cannot format target as string")
+            ),
+            None,
+        );
         rv
     }
 }
@@ -492,6 +526,7 @@ pub async fn run<S: AsRef<str>>(
     for t in targets {
         let t = t.as_ref();
         if t.find('\n').is_some() {
+            log_err!("{:?}: filenames containing newlines are not allowed.\n", t);
             return Err(BuildErrorKind::InvalidTarget(t.into()).into());
         }
     }
@@ -543,6 +578,7 @@ pub async fn run<S: AsRef<str>>(
         for t in targets {
             let t = t.as_ref();
             if t.is_empty() {
+                log_err!("cannot build the empty target (\"\").\n");
                 result.set(Err(BuildErrorKind::InvalidTarget(t.into()).into()));
                 break;
             }
@@ -581,7 +617,17 @@ pub async fn run<S: AsRef<str>>(
                     lock.try_lock().context(BuildErrorKind::Generic)?;
                 }
                 if !lock.is_owned() {
-                    // TODO(soon): meta something?
+                    logs::meta(
+                        "locked",
+                        state::target_relpath(ptx.state().env(), &t)
+                            .context(BuildErrorKind::Generic)?
+                            .to_str()
+                            .ok_or_else(|| {
+                                format_err!("could not format target as string")
+                                    .context(BuildErrorKind::Generic)
+                            })?,
+                        None,
+                    );
                     locked.push_back((f.id, t));
                 } else {
                     // We had to create f before we had a lock, because we need f.id
@@ -655,6 +701,17 @@ pub async fn run<S: AsRef<str>>(
                 backoff *= 2;
                 // after printing this line, redo-log will recurse into t,
                 // whether it's us building it, or someone else.
+                logs::meta(
+                    "waiting",
+                    state::target_relpath(ps_ref.borrow().env(), &t)
+                        .context(BuildErrorKind::Generic)?
+                        .to_str()
+                        .ok_or_else(|| {
+                            format_err!("could not format target as string")
+                                .context(BuildErrorKind::Generic)
+                        })?,
+                    None,
+                );
                 // TODO(someday): Check for cyclic dependency error.
                 lock.check();
                 // this sequence looks a little silly, but the idea is to
@@ -673,6 +730,17 @@ pub async fn run<S: AsRef<str>>(
                     .context(BuildErrorKind::Generic)?;
                 lock.try_lock().context(BuildErrorKind::Generic)?;
             }
+            logs::meta(
+                "unlocked",
+                state::target_relpath(ps_ref.borrow().env(), &t)
+                    .context(BuildErrorKind::Generic)?
+                    .to_str()
+                    .ok_or_else(|| {
+                        format_err!("could not format target as string")
+                            .context(BuildErrorKind::Generic)
+                    })?,
+                None,
+            );
             {
                 let mut ps = ps_ref.borrow_mut();
                 let mut ptx = ProcessTransaction::new(*ps, TransactionBehavior::Deferred)
@@ -738,6 +806,229 @@ fn try_stat<P: AsRef<Path>>(path: P) -> io::Result<Option<Metadata>> {
             io::ErrorKind::NotFound => Ok(None),
             _ => Err(e),
         },
+    }
+}
+
+pub fn close_stdin() -> Result<(), Error> {
+    use std::os::unix::io::AsRawFd;
+    let f = File::open("/dev/null")?;
+    unistd::dup2(f.as_raw_fd(), io::stdin().as_raw_fd())?;
+    Ok(())
+}
+
+/// A builder used to start a redo-log instance.
+#[derive(Clone, Debug)]
+pub struct StdinLogReaderBuilder {
+    status: bool,
+    details: bool,
+    pretty: bool,
+    color: i32,
+    debug_locks: bool,
+    debug_pids: bool,
+}
+
+impl StdinLogReaderBuilder {
+    #[inline]
+    pub const fn new() -> StdinLogReaderBuilder {
+        StdinLogReaderBuilder {
+            status: true,
+            details: true,
+            pretty: true,
+            color: 1, // auto
+            debug_locks: false,
+            debug_pids: false,
+        }
+    }
+
+    /// Set whether to display build summary line at the bottom of the screen.
+    #[inline]
+    pub fn set_status(&mut self, val: bool) -> &mut Self {
+        self.status = val;
+        self
+    }
+
+    #[inline]
+    pub fn set_details(&mut self, val: bool) -> &mut Self {
+        self.details = val;
+        self
+    }
+
+    #[inline]
+    pub fn set_pretty(&mut self, val: bool) -> &mut Self {
+        self.pretty = val;
+        self
+    }
+
+    /// Force logs to display without terminal colors.
+    #[inline]
+    pub fn disable_color(&mut self) -> &mut Self {
+        self.color = 0;
+        self
+    }
+
+    /// Force logs to display with terminal colors.
+    #[inline]
+    pub fn force_color(&mut self) -> &mut Self {
+        self.color = 2;
+        self
+    }
+
+    /// Set whether to print messages about file locking.
+    #[inline]
+    pub fn set_debug_locks(&mut self, val: bool) -> &mut Self {
+        self.debug_locks = val;
+        self
+    }
+
+    /// Set whether to print process IDs as part of log messages.
+    #[inline]
+    pub fn set_debug_pids(&mut self, val: bool) -> &mut Self {
+        self.debug_pids = val;
+        self
+    }
+
+    // Redirect stderr to a redo-log instance with the given options.
+    //
+    // Then we automatically run [`logs::setup`] to send the right data format
+    // to that redo-log instance.
+    //
+    // After this, be sure to run [`await_log_reader`] before exiting.
+    pub fn start(&self, e: &Env) -> Result<StdinLogReader, Error> {
+        use std::io::Write;
+
+        let (r, w) = unistd::pipe()?; // main pipe to redo-log
+        let (ar, aw) = unistd::pipe()?; // ack pipe from redo-log --ack-fd
+        io::stdout().flush()?;
+        io::stderr().flush()?;
+        match unsafe { unistd::fork() }? {
+            ForkResult::Parent { child: pid } => {
+                let stderr_fd = unistd::dup(2)?; // save for after the log pipe gets closed
+                unistd::close(r)?;
+                unistd::close(aw)?;
+                let mut b = [0u8; 8];
+                let bn = unistd::read(ar, &mut b)?;
+                let b = &b[..bn];
+                if b.is_empty() {
+                    // subprocess died without sending us anything: that's bad.
+                    log_err!("failed to start redo-log subprocess; cannot continue.\n");
+                    process::exit(99);
+                }
+                assert_eq!(b, b"REDO-OK\n");
+                // now we know the subproc is running and will report our errors
+                // to stderr, so it's okay to lose our own stderr.
+                unistd::close(ar)?;
+                unistd::dup2(w, 1)?;
+                unistd::dup2(w, 2)?;
+                unistd::close(w)?;
+                LogBuilder::new()
+                    .parent_logs(true)
+                    .pretty(true)
+                    .disable_color()
+                    .setup(e, io::stderr());
+                Ok(StdinLogReader { pid, stderr_fd })
+            }
+            ForkResult::Child => {
+                let res = panic::catch_unwind(|| -> () {
+                    unistd::close(ar).expect("could not close ar");
+                    unistd::close(w).expect("could not close w");
+                    unistd::dup2(r, 0).expect("could not duplicate pipe to redo-log stdin");
+                    unistd::close(r).expect("could not close r");
+                    // redo-log sends to stdout (because if you ask for logs, that's
+                    // the output you wanted!).  But redo itself sends logs to stderr
+                    // (because they're incidental to the thing you asked for).
+                    // To make these semantics work, we point redo-log's stdout at
+                    // our stderr when we launch it.
+                    unistd::dup2(2, 1).expect("could not point stdout to stderr");
+                    let mut argv: Vec<Cow<CStr>> = vec![
+                        Cow::Borrowed(const_cstr!("redo-log").as_cstr()),
+                        Cow::Borrowed(const_cstr!("--recursive").as_cstr()),
+                        Cow::Borrowed(const_cstr!("--follow").as_cstr()),
+                        Cow::Borrowed(const_cstr!("--ack-fd").as_cstr()),
+                        Cow::Owned(CString::new(format!("{}", aw)).unwrap()),
+                        if self.status && unistd::isatty(2).unwrap_or(false) {
+                            Cow::Borrowed(const_cstr!("--status").as_cstr())
+                        } else {
+                            Cow::Borrowed(const_cstr!("--no-status").as_cstr())
+                        },
+                        if self.details {
+                            Cow::Borrowed(const_cstr!("--details").as_cstr())
+                        } else {
+                            Cow::Borrowed(const_cstr!("--no-details").as_cstr())
+                        },
+                        if self.pretty {
+                            Cow::Borrowed(const_cstr!("--pretty").as_cstr())
+                        } else {
+                            Cow::Borrowed(const_cstr!("--no-pretty").as_cstr())
+                        },
+                        if self.debug_locks {
+                            Cow::Borrowed(const_cstr!("--debug-locks").as_cstr())
+                        } else {
+                            Cow::Borrowed(const_cstr!("--no-debug-locks").as_cstr())
+                        },
+                        if self.debug_pids {
+                            Cow::Borrowed(const_cstr!("--debug-pids").as_cstr())
+                        } else {
+                            Cow::Borrowed(const_cstr!("--no-debug-pids").as_cstr())
+                        },
+                    ];
+                    if self.color != 1 {
+                        argv.push(if self.color >= 2 {
+                            Cow::Borrowed(const_cstr!("--color").as_cstr())
+                        } else {
+                            Cow::Borrowed(const_cstr!("--no-color").as_cstr())
+                        });
+                    }
+                    argv.push(Cow::Borrowed(const_cstr!("-").as_cstr()));
+                    if let Err(e) = unistd::execvp(&argv[0], &argv) {
+                        eprintln!("redo-log: exec: {}", e);
+                    }
+                });
+                if let Err(e) = res {
+                    eprintln!("redo-log: exec: {:?}", e);
+                }
+                process::exit(99);
+            }
+        }
+    }
+}
+
+impl Default for StdinLogReaderBuilder {
+    #[inline]
+    fn default() -> StdinLogReaderBuilder {
+        StdinLogReaderBuilder::new()
+    }
+}
+
+impl From<&Env> for StdinLogReaderBuilder {
+    fn from(e: &Env) -> StdinLogReaderBuilder {
+        StdinLogReaderBuilder {
+            pretty: e.pretty != 0,
+            color: e.color,
+            debug_locks: e.debug_locks,
+            debug_pids: e.debug_pids,
+            ..StdinLogReaderBuilder::default()
+        }
+    }
+}
+
+/// Represents a handle to a running redo-log instance.
+#[derive(Debug)]
+pub struct StdinLogReader {
+    pid: Pid,
+    stderr_fd: RawFd,
+}
+
+impl Drop for StdinLogReader {
+    /// Await the redo-log instance we redirected stderr to.
+    fn drop(&mut self) {
+        // never actually close fd#1 or fd#2; insanity awaits.
+        // replace it with something else instead.
+        // Since our stdout/stderr are attached to redo-log's stdin,
+        // this will notify redo-log that it's time to die (after it finishes
+        // reading the logs)
+        unistd::dup2(self.stderr_fd, 1).expect("could not restore stdout");
+        unistd::dup2(self.stderr_fd, 2).expect("could not restore stderr");
+        wait::waitpid(Some(self.pid), None).expect("failed to wait on log reader");
     }
 }
 
@@ -809,4 +1100,8 @@ impl From<&BuildErrorKind> for i32 {
             _ => 1,
         }
     }
+}
+
+fn nice<P: AsRef<Path>>(env: &Env, t: P) -> io::Result<PathBuf> {
+    state::relpath(t, env.startdir())
 }

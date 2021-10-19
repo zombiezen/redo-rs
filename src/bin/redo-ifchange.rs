@@ -2,59 +2,28 @@ use failure::Error;
 use rusqlite::TransactionBehavior;
 use std::io;
 use std::path::PathBuf;
-use std::process;
 
-use redo::builder::{self, BuildError};
-use redo::{self, DepMode, Env, JobServer, ProcessState, ProcessTransaction};
+use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
+use redo::logs::LogBuilder;
+use redo::{self, log_debug2, log_err, DepMode, Env, JobServer, ProcessState, ProcessTransaction};
 
 fn main() {
-    match run() {
-        Ok(_) => {}
-        Err(e) => {
-            let name: String = match std::env::current_exe() {
-                Ok(exe) => exe
-                    .file_name()
-                    .map(|f| f.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| String::from("redo-ifchange")),
-                Err(_) => String::from("redo-ifchange"),
-            };
-            if let Some(bt) = e
-                .iter_chain()
-                .filter_map(|f| f.backtrace().filter(|bt| !bt.is_empty()))
-                .last()
-            {
-                eprint!("Backtrace:\n{}\n\n", bt);
-            }
-            let msg = e.iter_chain().fold(String::new(), |mut s, e| {
-                use std::fmt::Write;
-                if !s.is_empty() {
-                    write!(s, ": ").unwrap();
-                }
-                write!(s, "{}", e).unwrap();
-                s
-            });
-            eprintln!("{}: {}", name, msg);
-            let retcode = e
-                .downcast_ref::<BuildError>()
-                .map(|be| i32::from(be.kind()))
-                .unwrap_or(1);
-            process::exit(retcode);
-        }
-    }
+    redo::run_program("redo-ifchange", run);
 }
 
 fn run() -> Result<(), Error> {
-    use std::os::unix::io::AsRawFd;
-
     let mut targets: Vec<String> = std::env::args().skip(1).collect();
     let env = Env::init(targets.as_slice())?;
     let mut ps = ProcessState::init(env)?;
     if ps.is_toplevel() && targets.is_empty() {
         targets.push(String::from("all"));
     }
+    let mut _stdin_log_reader: Option<StdinLogReader> = None; // held during operation
     if ps.is_toplevel() && ps.env().log() != 0 {
         builder::close_stdin()?;
-        // TODO(someday): start_stdin_log_reader or logs.setup
+        _stdin_log_reader = Some(StdinLogReaderBuilder::default().start(ps.env())?);
+    } else {
+        LogBuilder::from(ps.env()).setup(ps.env(), io::stderr());
     }
 
     let mut server;
@@ -67,12 +36,20 @@ fn run() -> Result<(), Error> {
             me.push(ptx.state().env().startdir());
             me.push(ptx.state().env().pwd());
             me.push(ptx.state().env().target());
-            Some(redo::File::from_name(
+            let f = redo::File::from_name(
                 &mut ptx,
                 me.as_os_str().to_str().expect("invalid target name"),
                 true,
-            )?)
+            )?;
+            log_debug2!(
+                "TARGET: {:?} {:?} {:?}\n",
+                ptx.state().env().startdir(),
+                ptx.state().env().pwd(),
+                ptx.state().env().target()
+            );
+            Some(f)
         } else {
+            log_debug2!("redo-ifchange: not adding depends.\n");
             None
         };
         server = JobServer::setup(0)?;
@@ -90,13 +67,8 @@ fn run() -> Result<(), Error> {
     // Unclear what this is trying to do.
     assert!(ps.is_flushed());
     let return_tokens_result = server.force_return_tokens();
-    let log_reader_result = if ps.is_toplevel() {
-        builder::await_log_reader(ps.env(), io::stderr().as_raw_fd())
-    } else {
-        Ok(())
-    };
-    build_result
-        .map_err(|e| e.into())
-        .and(return_tokens_result)
-        .and(log_reader_result)
+    if let Err(e) = &return_tokens_result {
+        log_err!("unexpected error: {}", e);
+    }
+    build_result.map_err(|e| e.into()).and(return_tokens_result)
 }

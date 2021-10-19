@@ -473,12 +473,14 @@ impl File {
     }
 
     pub fn set_changed(&mut self, v: &Env) {
+        log_debug2!("BUILT: {:?} ({:?})\n", &self.name, &self.stamp);
         self.changed_runid = v.runid;
         self.failed_runid = None;
         self.is_override = false;
     }
 
     pub(crate) fn set_failed(&mut self, v: &Env) -> Result<(), Error> {
+        log_debug2!("FAILED: {:?}\n", &self.name);
         self.update_stamp(v, false)?;
         self.failed_runid = v.runid;
 
@@ -503,7 +505,7 @@ impl File {
         Ok(())
     }
 
-    fn set_override(&mut self, v: &Env) -> Result<(), Error> {
+    pub(crate) fn set_override(&mut self, v: &Env) -> Result<(), Error> {
         self.update_stamp(v, false)?;
         self.failed_runid = None;
         self.is_override = true;
@@ -521,6 +523,12 @@ impl File {
             return Err(format_err!("{:?} does not exist", self.name));
         }
         if self.stamp.as_ref() != Some(&newstamp) {
+            log_debug2!(
+                "STAMP: {}: {:?} -> {:?}\n",
+                &self.name,
+                &self.stamp,
+                &newstamp
+            );
             self.stamp = Some(newstamp);
             self.set_changed(v);
         }
@@ -585,6 +593,7 @@ impl File {
     /// delete them right away, because if the build fails, we still want to
     /// know the old deps.
     pub(crate) fn zap_deps1(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
+        log_debug2!("zap-deps1: {:?}\n", &self.name);
         ptx.write(
             "update Deps set delete_me=? where target=?",
             params!(true, self.id),
@@ -597,6 +606,7 @@ impl File {
     /// Dependencies of a given target can change from one build to the next.
     /// We forget old dependencies only after a build completes successfully.
     pub(crate) fn zap_deps2(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
+        log_debug2!("zap-deps2: {:?}\n", &self.name);
         ptx.write(
             "delete from Deps where target=? and delete_me=1",
             params!(self.id),
@@ -612,6 +622,12 @@ impl File {
         dep: &str,
     ) -> Result<(), Error> {
         let src = File::from_name(ptx, dep, true)?;
+        log_debug3!(
+            "add-dep: \"{}\" < {:?} \"{}\"\n",
+            &self.name,
+            mode,
+            &src.name
+        );
         assert_ne!(self.id, src.id);
         ptx.write(
             "insert or replace into Deps (target, mode, source, delete_me) values (?,?,?,?)",
@@ -661,6 +677,14 @@ impl File {
             .to_string_lossy()
             .into_owned())
     }
+}
+
+/// Given the ID of a `File`, return the filename of its build log.
+pub(crate) fn logname(v: &Env, fid: i64) -> PathBuf {
+    let mut p = PathBuf::from(&v.base);
+    p.push(".redo");
+    p.push(format!("log.{}", fid));
+    p
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -1030,6 +1054,33 @@ pub(crate) fn relpath<P1: AsRef<Path>, P2: AsRef<Path>>(t: P1, base: P2) -> io::
         buf.push(part);
     }
     Ok(buf)
+}
+
+/// Return a relative path for `t` that will work after we do
+/// `chdir(dirname(env.target()))`.
+///
+/// This is tricky!  `env.startdir()+env.pwd()` is the directory for the
+/// *dofile*, when the dofile was started.  However, inside the dofile, someone
+/// may have done a `chdir` to anywhere else.  `env.target()` is relative to the
+/// dofile path, so we have to first figure out where the dofile was, then find
+/// TARGET relative to that, then find t relative to that.
+///
+/// FIXME: find some cleaner terminology for all these different paths.
+pub(crate) fn target_relpath<P: AsRef<Path>>(env: &Env, t: P) -> io::Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let rel_dofile_dir = env.startdir().join(env.pwd());
+    let dofile_dir = helpers::abs_path(&cwd, &rel_dofile_dir);
+    let target = dofile_dir.join(env.target());
+    let target_dir = helpers::abs_path(
+        &cwd,
+        target.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid target path (no directory)",
+            )
+        })?,
+    );
+    relpath(t, target_dir)
 }
 
 /**

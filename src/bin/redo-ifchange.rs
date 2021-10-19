@@ -19,7 +19,7 @@ fn run() -> Result<(), Error> {
         targets.push(String::from("all"));
     }
     let mut _stdin_log_reader: Option<StdinLogReader> = None; // held during operation
-    if ps.is_toplevel() && ps.env().log() != 0 {
+    if ps.is_toplevel() && ps.env().log().unwrap_or(true) {
         builder::close_stdin()?;
         _stdin_log_reader = Some(StdinLogReaderBuilder::default().start(ps.env())?);
     } else {

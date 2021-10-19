@@ -3,6 +3,7 @@ use failure::{format_err, Error};
 use std::borrow::Cow;
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::iter;
 use std::path::{Path, PathBuf};
@@ -25,10 +26,10 @@ pub struct Env {
     pub(crate) verbose: i32,
     pub(crate) xtrace: i32,
     pub(crate) keep_going: bool,
-    pub(crate) log: i32,
+    log: i32,
     pub(crate) log_inode: OsString,
-    pub(crate) color: i32,
-    pub(crate) pretty: i32,
+    color: i32,
+    pretty: i32,
     pub(crate) shuffle: bool,
     pub(crate) startdir: PathBuf,
     pub(crate) runid: Option<i64>,
@@ -193,13 +194,41 @@ impl Env {
     }
 
     #[inline]
-    pub fn log(&self) -> i32 {
-        self.log
+    pub fn locks_broken(&self) -> bool {
+        self.locks_broken
     }
 
     #[inline]
-    pub fn locks_broken(&self) -> bool {
-        self.locks_broken
+    pub fn log(&self) -> OptionalBool {
+        if self.log == 0 {
+            OptionalBool::Off
+        } else if self.log == 1 {
+            OptionalBool::Auto
+        } else {
+            OptionalBool::On
+        }
+    }
+
+    #[inline]
+    pub fn color(&self) -> OptionalBool {
+        if self.color == 0 {
+            OptionalBool::Off
+        } else if self.color == 1 {
+            OptionalBool::Auto
+        } else {
+            OptionalBool::On
+        }
+    }
+
+    #[inline]
+    pub fn pretty(&self) -> OptionalBool {
+        if self.pretty == 0 {
+            OptionalBool::Off
+        } else if self.pretty == 1 {
+            OptionalBool::Auto
+        } else {
+            OptionalBool::On
+        }
     }
 
     #[inline]
@@ -239,4 +268,72 @@ fn get_int<K: AsRef<OsStr>>(key: K, default: i64) -> i64 {
 
 fn get_bool<K: AsRef<OsStr>>(key: K) -> bool {
     env::var_os(key).map_or(false, |v| !v.is_empty())
+}
+
+/// A tri-state value that is forced on or off, or has an automatic (default) value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(u8)]
+pub enum OptionalBool {
+    Off = 0,
+    Auto = 1,
+    On = 2,
+}
+
+impl OptionalBool {
+    /// Returns the boolean value or a provided default.
+    #[inline]
+    pub fn unwrap_or(self, default: bool) -> bool {
+        match self {
+            OptionalBool::On => true,
+            OptionalBool::Off => false,
+            OptionalBool::Auto => default,
+        }
+    }
+
+    /// Returns the boolean value or computes it from a closure.
+    #[inline]
+    pub fn unwrap_or_else<F: FnOnce() -> bool>(self, f: F) -> bool {
+        match self {
+            OptionalBool::On => true,
+            OptionalBool::Off => false,
+            OptionalBool::Auto => f(),
+        }
+    }
+}
+
+impl Default for OptionalBool {
+    #[inline]
+    fn default() -> OptionalBool {
+        OptionalBool::Auto
+    }
+}
+
+impl Display for OptionalBool {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            OptionalBool::Off => f.write_str("false"),
+            OptionalBool::Auto => f.write_str("auto"),
+            OptionalBool::On => f.write_str("true"),
+        }
+    }
+}
+
+impl From<Option<bool>> for OptionalBool {
+    fn from(ob: Option<bool>) -> OptionalBool {
+        match ob {
+            Some(true) => OptionalBool::On,
+            Some(false) => OptionalBool::Off,
+            None => OptionalBool::Auto,
+        }
+    }
+}
+
+impl From<OptionalBool> for Option<bool> {
+    fn from(ob: OptionalBool) -> Option<bool> {
+        match ob {
+            OptionalBool::On => Some(true),
+            OptionalBool::Off => Some(false),
+            OptionalBool::Auto => None,
+        }
+    }
 }

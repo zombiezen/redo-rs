@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-use super::env::Env;
+use super::env::{Env, OptionalBool};
 use super::helpers::OsBytes;
 
 /// A line-based logger.
@@ -101,7 +101,7 @@ impl<W: Write> Logger for PrettyLog<W> {
                 let _ = self.file.write(line[..start].as_bytes());
                 match meta.kind {
                     "unchanged" => {
-                        if self.config.log != 0 || self.config.debug != 0 {
+                        if self.config.log.unwrap_or(true) || self.config.debug != 0 {
                             self.pretty(
                                 &mut buf,
                                 meta.pid,
@@ -217,7 +217,7 @@ struct PrettyLogConfig {
     debug: i32,
     debug_locks: bool,
     debug_pids: bool,
-    log: i32,
+    log: OptionalBool,
 }
 
 impl From<&Env> for PrettyLogConfig {
@@ -227,7 +227,7 @@ impl From<&Env> for PrettyLogConfig {
             debug: e.debug,
             debug_locks: e.debug_locks,
             debug_pids: e.debug_pids,
-            log: e.log,
+            log: e.log(),
         }
     }
 }
@@ -241,7 +241,7 @@ lazy_static! {
 pub struct LogBuilder {
     parent_logs: bool,
     pretty: bool,
-    color: i32,
+    color: OptionalBool,
 }
 
 impl LogBuilder {
@@ -250,7 +250,7 @@ impl LogBuilder {
         LogBuilder {
             parent_logs: false,
             pretty: true,
-            color: 1, // auto
+            color: OptionalBool::Auto,
         }
     }
 
@@ -271,14 +271,14 @@ impl LogBuilder {
     /// Force logs to display without terminal colors.
     #[inline]
     pub fn disable_color(&mut self) -> &mut Self {
-        self.color = 0;
+        self.color = OptionalBool::Off;
         self
     }
 
     /// Force logs to display with terminal colors.
     #[inline]
     pub fn force_color(&mut self) -> &mut Self {
-        self.color = 2;
+        self.color = OptionalBool::On;
         self
     }
 
@@ -312,9 +312,9 @@ impl Default for LogBuilder {
 impl From<&Env> for LogBuilder {
     fn from(e: &Env) -> LogBuilder {
         LogBuilder {
-            parent_logs: e.log() != 0,
-            pretty: e.pretty != 0,
-            color: e.color,
+            parent_logs: e.log().unwrap_or(true),
+            pretty: e.pretty().unwrap_or(true),
+            color: e.color(),
         }
     }
 }
@@ -365,7 +365,7 @@ pub(crate) fn write(line: &str) {
     };
     if !logged {
         // Fallback to stderr.
-        let escapes = check_tty(AsRawFd::as_raw_fd(&io::stderr()), 0);
+        let escapes = check_tty(AsRawFd::as_raw_fd(&io::stderr()), OptionalBool::Off);
         let mut logger = PrettyLog::new(io::stderr(), escapes, PrettyLogConfig::default());
         logger.write_line(line);
     }
@@ -506,10 +506,12 @@ impl Default for ColorEscapes {
     }
 }
 
-fn check_tty(tty: RawFd, color: i32) -> ColorEscapes {
-    let color_ok = unistd::isatty(tty).unwrap_or(false)
-        && env::var_os("TERM").map_or(false, |v| v != "dumb" && v != "");
-    if (color != 0 && color_ok) || color >= 2 {
+fn check_tty(tty: RawFd, color: OptionalBool) -> ColorEscapes {
+    let color = color.unwrap_or_else(|| {
+        unistd::isatty(tty).unwrap_or(false)
+            && env::var_os("TERM").map_or(false, |v| v != "dumb" && v != "")
+    });
+    if color {
         ColorEscapes {
             red: b"\x1b[31m",
             green: b"\x1b[32m",

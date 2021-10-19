@@ -31,7 +31,7 @@ use std::time::Duration;
 use tempfile::{self, Builder as TempFileBuilder};
 use zombiezen_const_cstr::const_cstr;
 
-use super::env::Env;
+use super::env::{Env, OptionalBool};
 use super::helpers::{self, OsBytes};
 use super::jobserver::JobServerHandle;
 use super::logs::{self, LogBuilder};
@@ -228,7 +228,7 @@ impl BuildJob {
         // actually unlink() the file in case redo-log is about to start
         // reading a previous instance created during this session.  It
         // should always see either the old or new instance.
-        if ptx.state().env().log() != 0 {
+        if ptx.state().env().log().unwrap_or(true) {
             let lfend = state::logname(ptx.state().env(), sf.id);
             // Make sure the temp file is in the same directory as lfend,
             // so we can be sure of our ability to rename it atomically later.
@@ -822,7 +822,7 @@ pub struct StdinLogReaderBuilder {
     status: bool,
     details: bool,
     pretty: bool,
-    color: i32,
+    color: OptionalBool,
     debug_locks: bool,
     debug_pids: bool,
 }
@@ -834,7 +834,7 @@ impl StdinLogReaderBuilder {
             status: true,
             details: true,
             pretty: true,
-            color: 1, // auto
+            color: OptionalBool::Auto,
             debug_locks: false,
             debug_pids: false,
         }
@@ -862,14 +862,14 @@ impl StdinLogReaderBuilder {
     /// Force logs to display without terminal colors.
     #[inline]
     pub fn disable_color(&mut self) -> &mut Self {
-        self.color = 0;
+        self.color = OptionalBool::Off;
         self
     }
 
     /// Force logs to display with terminal colors.
     #[inline]
     pub fn force_color(&mut self) -> &mut Self {
-        self.color = 2;
+        self.color = OptionalBool::On;
         self
     }
 
@@ -971,8 +971,8 @@ impl StdinLogReaderBuilder {
                             Cow::Borrowed(const_cstr!("--no-debug-pids").as_cstr())
                         },
                     ];
-                    if self.color != 1 {
-                        argv.push(if self.color >= 2 {
+                    if let Some(color) = self.color.into() {
+                        argv.push(if color {
                             Cow::Borrowed(const_cstr!("--color").as_cstr())
                         } else {
                             Cow::Borrowed(const_cstr!("--no-color").as_cstr())
@@ -1002,8 +1002,8 @@ impl Default for StdinLogReaderBuilder {
 impl From<&Env> for StdinLogReaderBuilder {
     fn from(e: &Env) -> StdinLogReaderBuilder {
         StdinLogReaderBuilder {
-            pretty: e.pretty != 0,
-            color: e.color,
+            pretty: e.pretty().unwrap_or(true),
+            color: e.color(),
             debug_locks: e.debug_locks,
             debug_pids: e.debug_pids,
             ..StdinLogReaderBuilder::default()

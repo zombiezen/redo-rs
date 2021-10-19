@@ -102,7 +102,7 @@ pub mod logs;
 mod paths;
 mod state;
 
-pub use env::Env;
+pub use env::{Env, OptionalBool};
 pub use jobserver::JobServer;
 pub use state::{DepMode, File, ProcessState, ProcessTransaction, Stamp, ALWAYS};
 
@@ -140,5 +140,54 @@ pub fn run_program<S: AsRef<str>, F: FnOnce() -> Result<(), failure::Error>>(nam
                 .unwrap_or(1);
             std::process::exit(retcode)
         }
+    }
+}
+
+/// Return the common list of `redo-log` flags.
+pub fn redo_log_flags() -> Vec<clap::Arg<'static, 'static>> {
+    use clap::Arg;
+
+    vec![
+        Arg::from_usage("--no-details").help("only show 'redo' recursion trace, not build output"),
+        Arg::from_usage("--details")
+            .hidden(true)
+            .overrides_with("no-details"),
+        Arg::from_usage("--no-status").help("only show 'redo' recursion trace, not build output"),
+        Arg::from_usage("--status")
+            .hidden(true)
+            .overrides_with("no-status"),
+        Arg::from_usage("--no-pretty")
+            .help("don't pretty-print logs, show raw @@REDO output instead"),
+        Arg::from_usage("--pretty")
+            .hidden(true)
+            .overrides_with("no-pretty"),
+        Arg::from_usage("--no-color")
+            .help("disable ANSI color; --color to force enable (default: auto)"),
+        Arg::from_usage("--color")
+            .hidden(true)
+            .overrides_with("no-color"),
+        Arg::from_usage("--debug-locks 'print messages about file locking (useful for debugging)'"),
+        Arg::from_usage(
+            "--debug-pids 'print process ids as part of log messages (useful for debugging)'",
+        ),
+    ]
+}
+
+/// Converts an argument pair match of `name` and `"no-" + name` into a tri-state.
+pub fn auto_bool_arg<S: AsRef<str>>(matches: &clap::ArgMatches, name: S) -> OptionalBool {
+    let name = name.as_ref();
+    const NEGATIVE_PREFIX: &str = "no-";
+    let negative_name = {
+        let mut negative_name = String::with_capacity(name.len() + NEGATIVE_PREFIX.len());
+        negative_name.push_str(NEGATIVE_PREFIX);
+        negative_name.push_str(name);
+        negative_name
+    };
+    if matches.is_present(name) {
+        OptionalBool::On
+    } else if matches.is_present(negative_name) {
+        OptionalBool::Off
+    } else {
+        OptionalBool::Auto
     }
 }

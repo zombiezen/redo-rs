@@ -7,7 +7,9 @@ use std::path::Path;
 
 use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
 use redo::logs::LogBuilder;
-use redo::{self, log_err, log_warn, Env, JobServer, ProcessState, ProcessTransaction};
+use redo::{
+    self, log_err, log_warn, Env, JobServer, OptionalBool, ProcessState, ProcessTransaction,
+};
 
 fn main() {
     redo::run_program("redo", run);
@@ -39,30 +41,7 @@ fn run() -> Result<(), Error> {
                 .hidden(true)
                 .overrides_with("no-log"),
         )
-        .arg(
-            Arg::from_usage("--no-pretty")
-                .help("don't pretty-print logs, show raw @@REDO output instead"),
-        )
-        .arg(
-            Arg::from_usage("--pretty")
-                .hidden(true)
-                .overrides_with("no-pretty"),
-        )
-        .arg(
-            Arg::from_usage("--no-color")
-                .help("disable ANSI color; --color to force enable (default: auto)"),
-        )
-        .arg(
-            Arg::from_usage("--color")
-                .hidden(true)
-                .overrides_with("no-color"),
-        )
-        .arg(Arg::from_usage(
-            "--debug-locks 'print messages about file locking (useful for debugging)'",
-        ))
-        .arg(Arg::from_usage(
-            "--debug-pids 'print process ids as part of log messages (useful for debugging)'",
-        ))
+        .args(&redo::redo_log_flags())
         .arg(Arg::from_usage("[target]..."))
         .get_matches();
     {
@@ -89,42 +68,21 @@ fn run() -> Result<(), Error> {
     if matches.is_present("debug-pids") {
         std::env::set_var("REDO_DEBUG_PIDS", "1");
     }
-    std::env::set_var(
-        "REDO_LOG",
-        std::env::var_os("REDO_LOG").unwrap_or_else(|| {
-            OsString::from(if matches.is_present("no-log") {
-                "0"
-            } else if !matches.is_present("log") {
-                "1"
-            } else {
-                "2"
-            })
-        }),
-    );
-    std::env::set_var(
-        "REDO_PRETTY",
-        std::env::var_os("REDO_PRETTY").unwrap_or_else(|| {
-            OsString::from(if matches.is_present("no-pretty") {
-                "0"
-            } else if !matches.is_present("pretty") {
-                "1"
-            } else {
-                "2"
-            })
-        }),
-    );
-    std::env::set_var(
-        "REDO_COLOR",
-        std::env::var_os("REDO_COLOR").unwrap_or_else(|| {
-            OsString::from(if matches.is_present("no-color") {
-                "0"
-            } else if !matches.is_present("color") {
-                "1"
-            } else {
-                "2"
-            })
-        }),
-    );
+    let set_defint = |name: &str, val: OptionalBool| {
+        std::env::set_var(
+            name,
+            std::env::var_os(name).unwrap_or_else(|| {
+                OsString::from(match val {
+                    OptionalBool::Off => "0",
+                    OptionalBool::Auto => "1",
+                    OptionalBool::On => "2",
+                })
+            }),
+        );
+    };
+    set_defint("REDO_LOG", redo::auto_bool_arg(&matches, "log"));
+    set_defint("REDO_PRETTY", redo::auto_bool_arg(&matches, "pretty"));
+    set_defint("REDO_COLOR", redo::auto_bool_arg(&matches, "color"));
     let mut targets: Vec<&str> = matches
         .values_of("target")
         .map(|v| v.collect())
@@ -135,11 +93,11 @@ fn run() -> Result<(), Error> {
         targets.push("all");
     }
     let mut j = str::parse::<i32>(matches.value_of("jobs").unwrap_or("0")).unwrap_or(0);
-    if ps.is_toplevel() && (ps.env().log() != 0 || j > 1) {
+    if ps.is_toplevel() && (ps.env().log().unwrap_or(true) || j > 1) {
         builder::close_stdin()?;
     }
     let mut _stdin_log_reader: Option<StdinLogReader> = None;
-    if ps.is_toplevel() && ps.env().log() != 0 {
+    if ps.is_toplevel() && ps.env().log().unwrap_or(true) {
         _stdin_log_reader = Some(StdinLogReaderBuilder::from(ps.env()).start(ps.env())?);
     } else {
         LogBuilder::from(ps.env()).setup(ps.env(), io::stderr());

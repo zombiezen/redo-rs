@@ -124,7 +124,10 @@ impl<W: Write> Logger for PrettyLog<W> {
                                     self.escapes.red,
                                     &format!("{} (exit {})", name, rv),
                                 );
-                            } else {
+                            } else if self.config.verbose > 0
+                                || self.config.xtrace > 0
+                                || self.config.debug > 0
+                            {
                                 self.pretty(
                                     &mut buf,
                                     meta.pid,
@@ -215,6 +218,8 @@ struct PrettyLogConfig {
     debug: i32,
     debug_locks: bool,
     debug_pids: bool,
+    verbose: i32,
+    xtrace: i32,
     log: OptionalBool,
 }
 
@@ -225,6 +230,8 @@ impl From<&Env> for PrettyLogConfig {
             debug: e.debug,
             debug_locks: e.debug_locks(),
             debug_pids: e.debug_pids(),
+            verbose: e.verbose,
+            xtrace: e.xtrace,
             log: e.log(),
         }
     }

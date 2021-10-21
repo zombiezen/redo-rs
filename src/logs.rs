@@ -1,7 +1,7 @@
 use failure::{format_err, Error};
 use lazy_static::lazy_static;
 use libc::pid_t;
-use nix::unistd;
+use nix::unistd::{self, Pid};
 use std::env;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Write};
@@ -71,7 +71,7 @@ impl<W> PrettyLog<W> {
     fn pretty(&self, buf: &mut Vec<u8>, pid: pid_t, color: &[u8], s: &str) {
         buf.extend(color);
         if self.config.debug_pids {
-            write!(buf, "{:<6} redo  ", pid);
+            let _ = write!(buf, "{:<6} redo  ", pid);
         } else {
             buf.extend(b"redo  ");
         }
@@ -223,10 +223,10 @@ struct PrettyLogConfig {
 impl From<&Env> for PrettyLogConfig {
     fn from(e: &Env) -> PrettyLogConfig {
         PrettyLogConfig {
-            depth: OsBytes::new(&e.depth).collect(),
+            depth: e.depth().as_bytes().into(),
             debug: e.debug,
-            debug_locks: e.debug_locks,
-            debug_pids: e.debug_pids,
+            debug_locks: e.debug_locks(),
+            debug_pids: e.debug_pids(),
             log: e.log(),
         }
     }
@@ -265,6 +265,13 @@ impl LogBuilder {
     #[inline]
     pub fn pretty(&mut self, val: bool) -> &mut Self {
         self.pretty = val;
+        self
+    }
+
+    /// Sets terminal color behavior.
+    #[inline]
+    pub fn color(&mut self, val: OptionalBool) -> &mut Self {
+        self.color = val;
         self
     }
 
@@ -348,7 +355,7 @@ pub fn debug_level() -> i32 {
 /// # Panics
 ///
 /// If `s` contains a `'\n'` character.
-pub(crate) fn write(line: &str) {
+pub fn write(line: &str) {
     assert!(!line.contains('\n'));
     let logged = {
         let mut logger = GLOBAL_LOGGER
@@ -372,7 +379,7 @@ pub(crate) fn write(line: &str) {
 }
 
 /// Write a structured log-line to the process-wide logger.
-pub fn meta(kind: &str, s: &str, pid: Option<pid_t>) {
+pub fn meta(kind: &str, s: &str, pid: Option<Pid>) {
     use std::convert::TryFrom;
 
     let now = SystemTime::now();
@@ -381,20 +388,19 @@ pub fn meta(kind: &str, s: &str, pid: Option<pid_t>) {
         .expect("system time before UNIX epoch");
     debug_assert!(!kind.contains(':'));
     debug_assert!(!kind.contains('@'));
-    let pid = pid
-        .or_else(|| pid_t::try_from(process::id()).ok())
-        .unwrap_or(0);
+    let pid = pid.unwrap_or(unistd::getpid());
     let meta = Meta {
         kind,
-        pid,
+        pid: pid.as_raw(),
         timestamp: timestamp.as_secs_f64(),
         text: s,
     };
     write(&format!("{}", meta));
 }
 
+/// An immutable reference to a structured log-line.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Meta<'a> {
+pub struct Meta<'a> {
     kind: &'a str,
     pid: pid_t,
     timestamp: f64,
@@ -405,7 +411,8 @@ impl<'a> Meta<'a> {
     const PREFIX: &'static str = "@@REDO:";
     const SEP: &'static str = "@@ ";
 
-    fn parse(s: &'a str) -> Result<Meta<'a>, Error> {
+    /// Parses a log-line in-place.
+    pub fn parse(s: &'a str) -> Result<Meta<'a>, Error> {
         use failure::ResultExt;
 
         if !s.starts_with(Meta::PREFIX) {
@@ -452,6 +459,36 @@ impl<'a> Meta<'a> {
             timestamp,
             text,
         })
+    }
+
+    #[inline]
+    pub fn kind(self) -> &'a str {
+        self.kind
+    }
+
+    #[inline]
+    pub fn pid(self) -> Pid {
+        Pid::from_raw(self.pid)
+    }
+
+    #[inline]
+    pub fn timestamp(self) -> f64 {
+        self.timestamp
+    }
+
+    #[inline]
+    pub fn text(self) -> &'a str {
+        self.text
+    }
+
+    /// Parses a `"done"`-kind line into its exit code and the target name.
+    /// Returns `None` if `kind != "done"` or the text is not of the right format.
+    pub fn done_text(self) -> Option<(i32, &'a str)> {
+        if self.kind == "done" {
+            Meta::parse_done_text(self.text)
+        } else {
+            None
+        }
     }
 
     fn parse_done_text<'b>(text: &'b str) -> Option<(i32, &'b str)> {
@@ -521,5 +558,20 @@ fn check_tty(tty: RawFd, color: OptionalBool) -> ColorEscapes {
         }
     } else {
         ColorEscapes::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_done_text_simple() {
+        assert_eq!(Meta::parse_done_text("0 foo"), Some((0, "foo")));
+    }
+
+    #[test]
+    fn parse_done_text_multiple_spaces() {
+        assert_eq!(Meta::parse_done_text("1 foo bar"), Some((1, "foo bar")));
     }
 }

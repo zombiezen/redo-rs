@@ -5,6 +5,7 @@ use futures::future::FusedFuture;
 use futures::stream::{FusedStream, FuturesUnordered, Stream};
 use futures::{pin_mut, select};
 use nix::sys::signal::{self, SigHandler, Signal};
+use nix::sys::stat;
 use nix::sys::wait;
 use nix::unistd::{self, ForkResult, Pid};
 use rand;
@@ -90,6 +91,7 @@ impl BuildJob {
         server: &JobServerHandle,
         before_t: Option<Metadata>,
     ) -> Result<Pin<Box<dyn Future<Output = i32> + 'a>>, Error> {
+        use std::os::unix::fs::MetadataExt;
         use std::os::unix::io::AsRawFd;
 
         debug_assert!(self.lock.is_owned());
@@ -229,7 +231,7 @@ impl BuildJob {
         // reading a previous instance created during this session.  It
         // should always see either the old or new instance.
         if ptx.state().env().log().unwrap_or(true) {
-            let lfend = state::logname(ptx.state().env(), sf.id);
+            let lfend = state::logname(ptx.state().env(), sf.id());
             // Make sure the temp file is in the same directory as lfend,
             // so we can be sure of our ability to rename it atomically later.
             let lfd = TempFileBuilder::new()
@@ -290,9 +292,9 @@ impl BuildJob {
                 target
             });
             env::set_var("REDO_DEPTH", {
-                let mut depth = OsString::new();
-                depth.push(&ps.env().depth);
-                depth.push("  ");
+                let mut depth = String::new();
+                depth.push_str(ps.env().depth());
+                depth.push_str("  ");
                 depth
             });
             if ps.env().xtrace == 1 {
@@ -315,9 +317,33 @@ impl BuildJob {
             if helpers::close_on_exec(1, false).is_err() {
                 return 1;
             }
-            // TODO(someday): if env.v.LOG
-            {
-                // else:
+            if ps.env().log().unwrap_or(true) {
+                let cur_inode = stat::fstat(2)
+                    .map(|st| OsString::from(st.st_ino.to_string()))
+                    .unwrap_or_default();
+                if ps.env().log_inode().is_empty() || ps.env().log_inode() == cur_inode {
+                    // .do script has *not* redirected stderr, which means we're
+                    // using redo-log's log saving mode.  That means subprocs
+                    // should be logged to their own file.  If the .do script
+                    // *does* redirect stderr, that redirection should be inherited
+                    // by subprocs, so we'd do nothing.
+                    let logf = match File::create(state::logname(ps.env(), sf.id())) {
+                        Ok(logf) => logf,
+                        Err(e) => {
+                            eprintln!("create log: {}", e);
+                            return 1;
+                        }
+                    };
+                    let new_inode = logf
+                        .metadata()
+                        .map(|m| OsString::from(m.ino().to_string()))
+                        .unwrap_or_default();
+                    env::set_var("REDO_LOG", "1"); // .do files can check this
+                    env::set_var("REDO_LOG_INODE", new_inode);
+                    unistd::dup2(logf.as_raw_fd(), 2).expect("cannot redirect log to stderr");
+                    let _ = helpers::close_on_exec(2, false);
+                }
+            } else {
                 env::remove_var("REDO_LOG_INODE");
                 env::set_var("REDO_LOG", "");
             }
@@ -543,7 +569,7 @@ pub async fn run<S: AsRef<str>>(
                 state::File::from_name(&mut ptx, &me.to_string_lossy(), true)
                     .context(BuildErrorKind::Generic)?
             };
-            let selflock = ps.new_lock(state::LOG_LOCK_MAGIC + (myfile.id as i32));
+            let selflock = ps.new_lock(state::LOG_LOCK_MAGIC + (myfile.id() as i32));
             Some((me, myfile, selflock))
         } else {
             None
@@ -610,7 +636,7 @@ pub async fn run<S: AsRef<str>>(
                 ptx.set_drop_behavior(DropBehavior::Commit);
                 let mut f =
                     state::File::from_name(&mut ptx, t, true).context(BuildErrorKind::Generic)?;
-                let mut lock = ptx.state().new_lock(f.id.try_into().unwrap());
+                let mut lock = ptx.state().new_lock(f.id().try_into().unwrap());
                 if ptx.state().env().unlocked {
                     lock.force_owned();
                 } else {
@@ -628,7 +654,7 @@ pub async fn run<S: AsRef<str>>(
                             })?,
                         None,
                     );
-                    locked.push_back((f.id, t));
+                    locked.push_back((f.id(), t));
                 } else {
                     // We had to create f before we had a lock, because we need f.id
                     // to make the lock.  But someone may have updated the state
@@ -1004,8 +1030,8 @@ impl From<&Env> for StdinLogReaderBuilder {
         StdinLogReaderBuilder {
             pretty: e.pretty().unwrap_or(true),
             color: e.color(),
-            debug_locks: e.debug_locks,
-            debug_pids: e.debug_pids,
+            debug_locks: e.debug_locks(),
+            debug_pids: e.debug_pids(),
             ..StdinLogReaderBuilder::default()
         }
     }

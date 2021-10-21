@@ -18,16 +18,16 @@ pub struct Env {
     pub(crate) base: PathBuf,
     pub(crate) pwd: PathBuf,
     pub(crate) target: PathBuf,
-    pub(crate) depth: OsString,
+    depth: String,
     pub(crate) debug: i32,
-    pub(crate) debug_locks: bool,
-    pub(crate) debug_pids: bool,
-    pub(crate) locks_broken: bool,
+    debug_locks: bool,
+    debug_pids: bool,
+    locks_broken: bool,
     pub(crate) verbose: i32,
     pub(crate) xtrace: i32,
     pub(crate) keep_going: bool,
     log: i32,
-    pub(crate) log_inode: OsString,
+    log_inode: OsString,
     color: i32,
     pretty: i32,
     pub(crate) shuffle: bool,
@@ -152,7 +152,7 @@ impl Env {
             base: env::var_os("REDO_BASE").unwrap_or_default().into(),
             pwd: env::var_os("REDO_PWD").unwrap_or_default().into(),
             target: env::var_os("REDO_TARGET").unwrap_or_default().into(),
-            depth: env::var_os("REDO_DEPTH").unwrap_or_default(),
+            depth: env::var("REDO_DEPTH").unwrap_or_default(),
             debug: get_int("REDO_DEBUG", 0) as i32,
             debug_locks: get_bool("REDO_DEBUG_LOCKS"),
             debug_pids: get_bool("REDO_DEBUG_PIDS"),
@@ -173,6 +173,12 @@ impl Env {
             unlocked: get_bool("REDO_UNLOCKED"),
             no_oob: get_bool("REDO_NO_OOB"),
         };
+        if v.depth.contains(|c| c != ' ') {
+            return Err(format_err!(
+                "REDO_DEPTH={:?} contains non-space characters",
+                &v.depth
+            ));
+        }
         // not inheritable by subprocesses
         env::set_var("REDO_UNLOCKED", "");
         env::set_var("REDO_NO_OOB", "");
@@ -194,6 +200,47 @@ impl Env {
         &self.target
     }
 
+    /// Indent depth of the logs for this process as a string of the appropriate
+    /// number of space characters.
+    #[inline]
+    pub fn depth(&self) -> &str {
+        &self.depth
+    }
+
+    /// Set the log depth to `n` spaces.
+    #[inline]
+    pub fn set_depth(&mut self, n: usize) {
+        if n < self.depth.len() {
+            self.depth.truncate(n);
+            return;
+        }
+        while n > self.depth.len() {
+            self.depth.push(' ');
+        }
+    }
+
+    /// Whether to print messages about file locking (useful for debugging).
+    #[inline]
+    pub fn debug_locks(&self) -> bool {
+        self.debug_locks
+    }
+
+    #[inline]
+    pub fn set_debug_locks(&mut self, val: bool) {
+        self.debug_locks = val;
+    }
+
+    /// Whether to print process ids as part of log messages (useful for debugging).
+    #[inline]
+    pub fn debug_pids(&self) -> bool {
+        self.debug_pids
+    }
+
+    #[inline]
+    pub fn set_debug_pids(&mut self, val: bool) {
+        self.debug_pids = val;
+    }
+
     #[inline]
     pub fn locks_broken(&self) -> bool {
         self.locks_broken
@@ -208,6 +255,11 @@ impl Env {
         } else {
             OptionalBool::On
         }
+    }
+
+    #[inline]
+    pub fn log_inode(&self) -> &OsStr {
+        &self.log_inode
     }
 
     #[inline]

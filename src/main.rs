@@ -62,10 +62,10 @@ fn run() -> Result<(), Error> {
             std::env::set_var("REDO_XTRACE", n.to_string());
         }
     }
-    if matches.is_present("debug-locks") {
+    if redo::auto_bool_arg(&matches, "debug-locks").unwrap_or(false) {
         std::env::set_var("REDO_DEBUG_LOCKS", "1");
     }
-    if matches.is_present("debug-pids") {
+    if redo::auto_bool_arg(&matches, "debug-pids").unwrap_or(false) {
         std::env::set_var("REDO_DEBUG_PIDS", "1");
     }
     let set_defint = |name: &str, val: OptionalBool| {
@@ -87,6 +87,7 @@ fn run() -> Result<(), Error> {
         .values_of("target")
         .map(|v| v.collect())
         .unwrap_or_default();
+
     let env = Env::init(targets.as_slice())?;
     let mut ps = ProcessState::init(env)?;
     if ps.is_toplevel() && targets.is_empty() {
@@ -98,7 +99,14 @@ fn run() -> Result<(), Error> {
     }
     let mut _stdin_log_reader: Option<StdinLogReader> = None;
     if ps.is_toplevel() && ps.env().log().unwrap_or(true) {
-        _stdin_log_reader = Some(StdinLogReaderBuilder::from(ps.env()).start(ps.env())?);
+        _stdin_log_reader = Some(
+            StdinLogReaderBuilder::from(ps.env())
+                .set_status(redo::auto_bool_arg(&matches, "status").unwrap_or(true))
+                .set_details(redo::auto_bool_arg(&matches, "details").unwrap_or(true))
+                .set_debug_locks(redo::auto_bool_arg(&matches, "debug-locks").unwrap_or(false))
+                .set_debug_pids(redo::auto_bool_arg(&matches, "debug-pids").unwrap_or(false))
+                .start(ps.env())?,
+        );
     } else {
         LogBuilder::from(ps.env()).setup(ps.env(), io::stderr());
     }

@@ -173,8 +173,7 @@ extern "C" {
 /// string `.`.
 ///
 /// See also Rob Pike, [Lexical File Names in Plan 9 or Getting Dot-Dot Right](https://9p.io/sys/doc/lexnames.html).
-#[allow(dead_code)]
-pub(crate) fn normpath<'a, P: AsRef<Path> + ?Sized>(p: &'a P) -> Cow<'a, Path> {
+pub fn normpath<'a, P: AsRef<Path> + ?Sized>(p: &'a P) -> Cow<'a, Path> {
     let original = p.as_ref();
     let (vol_len, p) = strip_volume_name(original);
     if p.as_os_str().is_empty() {

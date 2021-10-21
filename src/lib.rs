@@ -103,8 +103,12 @@ mod paths;
 mod state;
 
 pub use env::{Env, OptionalBool};
+pub use helpers::normpath;
 pub use jobserver::JobServer;
-pub use state::{DepMode, File, ProcessState, ProcessTransaction, Stamp, ALWAYS};
+pub use state::{
+    logname, relpath, DepMode, File, FileError, FileErrorKind, Lock, LockType, ProcessState,
+    ProcessTransaction, Stamp, ALWAYS, LOG_LOCK_MAGIC,
+};
 
 /// Basic main wrapper.
 pub fn run_program<S: AsRef<str>, F: FnOnce() -> Result<(), failure::Error>>(name: S, run: F) -> ! {
@@ -152,7 +156,8 @@ pub fn redo_log_flags() -> Vec<clap::Arg<'static, 'static>> {
         Arg::from_usage("--details")
             .hidden(true)
             .overrides_with("no-details"),
-        Arg::from_usage("--no-status").help("only show 'redo' recursion trace, not build output"),
+        Arg::from_usage("--no-status")
+            .help("don't display build summary line at the bottom of the screen"),
         Arg::from_usage("--status")
             .hidden(true)
             .overrides_with("no-status"),
@@ -167,9 +172,15 @@ pub fn redo_log_flags() -> Vec<clap::Arg<'static, 'static>> {
             .hidden(true)
             .overrides_with("no-color"),
         Arg::from_usage("--debug-locks 'print messages about file locking (useful for debugging)'"),
+        Arg::from_usage("--no-debug-locks")
+            .hidden(true)
+            .overrides_with("debug-locks"),
         Arg::from_usage(
             "--debug-pids 'print process ids as part of log messages (useful for debugging)'",
         ),
+        Arg::from_usage("--no-debug-pids")
+            .hidden(true)
+            .overrides_with("debug-pids"),
     ]
 }
 

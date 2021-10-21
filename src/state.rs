@@ -1,4 +1,4 @@
-use failure::{format_err, Error, ResultExt};
+use failure::{format_err, Backtrace, Context, Error, Fail, ResultExt};
 use libc::{self, c_int, c_short, flock, off_t};
 use libsqlite3_sys;
 use nix;
@@ -16,6 +16,7 @@ use std::cell::RefCell;
 use std::cmp;
 use std::collections::HashSet;
 use std::ffi::OsStr;
+use std::fmt::{self, Display, Formatter};
 use std::fs::{self, Metadata, OpenOptions};
 use std::io;
 use std::mem;
@@ -35,7 +36,7 @@ const SCHEMA_VER: i32 = 2;
 pub const ALWAYS: &str = "//ALWAYS";
 
 /// fid offset for "log locks".
-pub(crate) const LOG_LOCK_MAGIC: i32 = 0x10000000;
+pub const LOG_LOCK_MAGIC: i32 = 0x10000000;
 
 /// Connection to the state database.
 #[derive(Debug)]
@@ -179,13 +180,20 @@ impl ProcessState {
         })
     }
 
+    /// Borrow the process state's environment variables immutably.
     #[inline]
     pub fn env(&self) -> &Env {
         &self.env
     }
 
+    /// Borrow the process state's environment variables mutably.
     #[inline]
-    pub(crate) fn new_lock(&self, fid: i32) -> Lock {
+    pub fn env_mut(&mut self) -> &mut Env {
+        &mut self.env
+    }
+
+    #[inline]
+    pub fn new_lock(&self, fid: i32) -> Lock {
         Lock::new(self.lock_manager.clone(), fid)
     }
 
@@ -303,7 +311,7 @@ fn connect<P: AsRef<Path>>(env: &Env, dbfile: P) -> rusqlite::Result<Connection>
     // locking.  On WSL, at least PERSIST works in single-threaded mode, so
     // if we're careful we can use it, more or less.
     db.query_row(
-        if env.locks_broken {
+        if env.locks_broken() {
             "pragma journal_mode = PERSIST"
         } else {
             "pragma journal_mode = WAL"
@@ -318,7 +326,7 @@ fn connect<P: AsRef<Path>>(env: &Env, dbfile: P) -> rusqlite::Result<Connection>
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct File {
-    pub(crate) id: i64,
+    id: i64,
     pub(crate) name: String,
     pub(crate) is_generated: bool,
     pub(crate) is_override: bool,
@@ -345,14 +353,15 @@ impl File {
         ptx: &mut ProcessTransaction,
         name: &str,
         allow_add: bool,
-    ) -> Result<File, Error> {
+    ) -> Result<File, FileError> {
         let mut q = String::from(FILE_QUERY_PREFIX);
         q.push_str("where name=?");
         let normalized_name: Cow<str> = if name == ALWAYS {
             Cow::Borrowed(&ALWAYS)
         } else {
             Cow::Owned(
-                relpath(name, &ptx.state().env.base)?
+                relpath(name, &ptx.state().env.base)
+                    .context(FileErrorKind::Generic)?
                     .to_string_lossy()
                     .into_owned(),
             )
@@ -364,9 +373,11 @@ impl File {
                 File::from_cols(&ptx.state().env, row)
             }) {
             Ok(f) => Ok(f),
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Err(e @ rusqlite::Error::QueryReturnedNoRows) => {
                 if !allow_add {
-                    return Err(format_err!("no file with name={:?}", normalized_name));
+                    return Err(e
+                        .context(FileErrorKind::NameNotFound(normalized_name.into_owned()))
+                        .into());
                 }
                 match ptx.write(
                     "insert into Files (name) values (?)",
@@ -384,7 +395,7 @@ impl File {
                         // big deal.
                     }
                     Err(e) => {
-                        return Err(e.into());
+                        return Err(e.context(FileErrorKind::Generic).into());
                     }
                 }
                 Ok(ptx
@@ -392,18 +403,25 @@ impl File {
                     .db
                     .query_row(q.as_str(), params!(&normalized_name), |row| {
                         File::from_cols(&ptx.state().env, row)
-                    })?)
+                    })
+                    .context(FileErrorKind::Generic)?)
             }
-            Err(e) => Err(e.into()),
+            Err(e) => Err(e.context(FileErrorKind::Generic).into()),
         }
     }
 
     pub(crate) fn from_id(ptx: &mut ProcessTransaction, id: i64) -> Result<File, Error> {
         let mut q = String::from(FILE_QUERY_PREFIX);
         q.push_str("where rowid=?");
-        Ok(ptx.state().db.query_row(q.as_str(), params!(id), |row| {
+        match ptx.state().db.query_row(q.as_str(), params!(id), |row| {
             File::from_cols(&ptx.state().env, row)
-        })?)
+        }) {
+            Ok(f) => Ok(f),
+            Err(e @ rusqlite::Error::QueryReturnedNoRows) => {
+                Err(e.context(FileErrorKind::IDNotFound(id)).into())
+            }
+            Err(e) => Err(e.context(FileErrorKind::Generic).into()),
+        }
     }
 
     pub(crate) fn from_cols(env: &Env, row: &Row) -> rusqlite::Result<File> {
@@ -432,6 +450,11 @@ impl File {
             }
         }
         Ok(f)
+    }
+
+    #[inline]
+    pub fn id(&self) -> i64 {
+        self.id
     }
 
     #[inline]
@@ -679,8 +702,80 @@ impl File {
     }
 }
 
+/// Kinds of file errors.
+#[derive(Clone, Eq, PartialEq, Debug, Fail)]
+#[non_exhaustive]
+pub enum FileErrorKind {
+    #[fail(display = "redo file error")]
+    Generic,
+    #[fail(display = "No file with name={:?}", _0)]
+    NameNotFound(String),
+    #[fail(display = "No file with id={:?}", _0)]
+    IDNotFound(i64),
+}
+
+impl FileErrorKind {
+    #[inline]
+    pub fn is_not_found(&self) -> bool {
+        match self {
+            FileErrorKind::NameNotFound(_) | FileErrorKind::IDNotFound(_) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Default for FileErrorKind {
+    #[inline]
+    fn default() -> FileErrorKind {
+        FileErrorKind::Generic
+    }
+}
+
+/// Errors related to file entries in the redo database.
+#[derive(Debug)]
+pub struct FileError {
+    inner: Context<FileErrorKind>,
+}
+
+impl FileError {
+    #[inline]
+    pub fn kind(&self) -> &FileErrorKind {
+        self.inner.get_context()
+    }
+}
+
+impl Fail for FileError {
+    fn cause(&self) -> Option<&dyn Fail> {
+        self.inner.cause()
+    }
+
+    fn backtrace(&self) -> Option<&Backtrace> {
+        self.inner.backtrace()
+    }
+}
+
+impl Display for FileError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Display::fmt(&self.inner, f)
+    }
+}
+
+impl From<FileErrorKind> for FileError {
+    fn from(kind: FileErrorKind) -> FileError {
+        FileError {
+            inner: Context::new(kind),
+        }
+    }
+}
+
+impl From<Context<FileErrorKind>> for FileError {
+    fn from(inner: Context<FileErrorKind>) -> FileError {
+        FileError { inner }
+    }
+}
+
 /// Given the ID of a `File`, return the filename of its build log.
-pub(crate) fn logname(v: &Env, fid: i64) -> PathBuf {
+pub fn logname(v: &Env, fid: i64) -> PathBuf {
     let mut p = PathBuf::from(&v.base);
     p.push(".redo");
     p.push(format!("log.{}", fid));
@@ -910,8 +1005,9 @@ impl LockManager {
     }
 }
 
+/// Types of locks.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub(crate) enum LockType {
+pub enum LockType {
     Exclusive,
     Shared,
 }
@@ -924,7 +1020,7 @@ impl Default for LockType {
 
 /// An object representing a lock on a redo target file.
 #[derive(Debug)]
-pub(crate) struct Lock {
+pub struct Lock {
     manager: Rc<LockManager>,
     owned: bool,
     fid: i32,
@@ -959,7 +1055,7 @@ impl Lock {
     }
 
     /// Non-blocking try to acquire our lock; returns true if it worked.
-    pub(crate) fn try_lock(&mut self) -> nix::Result<bool> {
+    pub fn try_lock(&mut self) -> nix::Result<bool> {
         self.check();
         assert!(!self.owned);
         let result = fcntl::fcntl(
@@ -977,7 +1073,7 @@ impl Lock {
     }
 
     /// Try to acquire our lock, and wait if it's currently locked.
-    pub(crate) fn wait_lock(&mut self, lock_type: LockType) -> nix::Result<()> {
+    pub fn wait_lock(&mut self, lock_type: LockType) -> nix::Result<()> {
         self.check();
         assert!(!self.owned);
         let fcntl_type = match lock_type {
@@ -993,7 +1089,7 @@ impl Lock {
     }
 
     /// Release the lock, which we must currently own.
-    pub(crate) fn unlock(&mut self) -> nix::Result<()> {
+    pub fn unlock(&mut self) -> nix::Result<()> {
         assert!(self.owned, "can't unlock {} - we don't own it", self.fid);
         fcntl::fcntl(
             self.manager.file.as_raw_fd(),
@@ -1027,7 +1123,7 @@ fn fid_flock(typ: c_int, fid: i32) -> flock {
 }
 
 /// Given a relative or absolute path `t`, express it relative to `base`.
-pub(crate) fn relpath<P1: AsRef<Path>, P2: AsRef<Path>>(t: P1, base: P2) -> io::Result<PathBuf> {
+pub fn relpath<P1: AsRef<Path>, P2: AsRef<Path>>(t: P1, base: P2) -> io::Result<PathBuf> {
     let t = t.as_ref();
     // TODO(maybe): Memoize cwd
     let cwd = std::env::current_dir()?;

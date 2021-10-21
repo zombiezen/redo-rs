@@ -8,7 +8,8 @@ use std::path::Path;
 use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
 use redo::logs::LogBuilder;
 use redo::{
-    self, log_err, log_warn, Env, JobServer, OptionalBool, ProcessState, ProcessTransaction,
+    self, log_err, log_warn, Dirtiness, Env, JobServer, OptionalBool, ProcessState,
+    ProcessTransaction,
 };
 
 fn main() {
@@ -138,7 +139,12 @@ fn run() -> Result<(), Error> {
     }
     let mut server = JobServer::setup(1)?;
     assert!(ps.is_flushed());
-    let build_result = server.block_on(builder::run(&mut ps, &mut server.handle(), &targets));
+    let build_result = server.block_on(builder::run(
+        &mut ps,
+        &mut server.handle(),
+        &targets,
+        |_, _| Ok((true, Dirtiness::Dirty)),
+    ));
     assert!(ps.is_flushed());
     let return_tokens_result = server.force_return_tokens();
     if let Err(e) = &return_tokens_result {

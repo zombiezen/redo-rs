@@ -337,16 +337,15 @@ pub struct File {
     pub(crate) csum: Option<String>,
 }
 
-const FILE_QUERY_PREFIX: &str = "select rowid, \
-                              name, \
-                              is_generated, \
-                              is_override, \
-                              checked_runid, \
-                              changed_runid, \
-                              failed_runid, \
-                              stamp, \
-                              csum \
-                              from Files ";
+const FILE_COLS: &str = "Files.rowid as \"rowid\", \
+                         name as \"name\", \
+                         is_generated as \"is_generated\", \
+                         is_override as \"is_override\", \
+                         checked_runid as \"checked_runid\", \
+                         changed_runid as \"changed_runid\", \
+                         failed_runid as \"failed_runid\", \
+                         stamp as \"stamp\", \
+                         csum as \"csum\"";
 
 impl File {
     pub fn from_name(
@@ -354,8 +353,7 @@ impl File {
         name: &str,
         allow_add: bool,
     ) -> Result<File, FileError> {
-        let mut q = String::from(FILE_QUERY_PREFIX);
-        q.push_str("where name=?");
+        let q = format!("select {} from Files where name=?", FILE_COLS);
         let normalized_name: Cow<str> = if name == ALWAYS {
             Cow::Borrowed(&ALWAYS)
         } else {
@@ -411,8 +409,7 @@ impl File {
     }
 
     pub(crate) fn from_id(ptx: &mut ProcessTransaction, id: i64) -> Result<File, Error> {
-        let mut q = String::from(FILE_QUERY_PREFIX);
-        q.push_str("where rowid=?");
+        let q = format!("select {} from Files where rowid=?", FILE_COLS);
         match ptx.state().db.query_row(q.as_str(), params!(id), |row| {
             File::from_cols(&ptx.state().env, row)
         }) {
@@ -493,6 +490,14 @@ impl File {
 
     fn set_checked(&mut self, v: &Env) {
         self.checked_runid = v.runid;
+    }
+
+    pub(crate) fn set_checked_save(
+        &mut self,
+        ptx: &mut ProcessTransaction<'_>,
+    ) -> Result<(), Error> {
+        self.set_checked(ptx.state().env());
+        self.save(ptx)
     }
 
     pub fn set_changed(&mut self, v: &Env) {
@@ -603,11 +608,35 @@ impl File {
         }
     }
 
-    pub(crate) fn is_failed(&self, v: &Env) -> bool {
+    /// Reports whether the file already failed during this run.
+    pub fn is_failed(&self, v: &Env) -> bool {
         match self.failed_runid {
             Some(failed_runid) => failed_runid != 0 && failed_runid >= v.runid.unwrap(),
             None => false,
         }
+    }
+
+    /// Return the list of objects that this object depends on.
+    pub(crate) fn deps(&self, ptx: &ProcessTransaction) -> Result<Vec<(DepMode, File)>, Error> {
+        if self.is_override || !self.is_generated {
+            return Ok(Vec::new());
+        }
+        let mut stmt = ptx.state().db.prepare(&format!(
+            "select Deps.mode, Deps.source, {} \
+            from Files \
+            join Deps on Files.rowid = Deps.source \
+            where target=?",
+            FILE_COLS
+        ))?;
+        let mut rows = stmt.query(params!(self.id))?;
+
+        let mut deps = Vec::new();
+        while let Some(row) = rows.next()? {
+            let mode: DepMode = row.get(0)?;
+            let f = File::from_cols(ptx.state().env(), row)?;
+            deps.push((mode, f));
+        }
+        Ok(deps)
     }
 
     /// Mark the list of dependencies of this object as deprecated.
@@ -1177,6 +1206,10 @@ pub(crate) fn target_relpath<P: AsRef<Path>>(env: &Env, t: P) -> io::Result<Path
         })?,
     );
     relpath(t, target_dir)
+}
+
+pub(crate) fn warn_override(name: &str) {
+    log_warn!("{} - you modified it; skipping\n", name);
 }
 
 /**

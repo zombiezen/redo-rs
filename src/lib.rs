@@ -95,6 +95,7 @@ macro_rules! log_debug3 {
 }
 
 pub mod builder;
+mod deps;
 mod env;
 mod helpers;
 mod jobserver;
@@ -102,6 +103,7 @@ pub mod logs;
 mod paths;
 mod state;
 
+pub use deps::{is_dirty, Dirtiness};
 pub use env::{Env, OptionalBool};
 pub use helpers::normpath;
 pub use jobserver::JobServer;

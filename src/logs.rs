@@ -7,13 +7,11 @@ use std::fmt::{self, Display, Formatter};
 use std::io::{self, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
-use std::process;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
 use super::env::{Env, OptionalBool};
-use super::helpers::OsBytes;
 
 /// A line-based logger.
 trait Logger {
@@ -380,8 +378,6 @@ pub fn write(line: &str) {
 
 /// Write a structured log-line to the process-wide logger.
 pub fn meta(kind: &str, s: &str, pid: Option<Pid>) {
-    use std::convert::TryFrom;
-
     let now = SystemTime::now();
     let timestamp = now
         .duration_since(SystemTime::UNIX_EPOCH)

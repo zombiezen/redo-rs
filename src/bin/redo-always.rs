@@ -1,40 +1,11 @@
 use failure::Error;
 use rusqlite::TransactionBehavior;
 use std::path::PathBuf;
-use std::process;
 
 use redo::{self, DepMode, Env, ProcessState, ProcessTransaction, Stamp};
 
 fn main() {
-    match run() {
-        Ok(_) => {}
-        Err(e) => {
-            let name: String = match std::env::current_exe() {
-                Ok(exe) => exe
-                    .file_name()
-                    .map(|f| f.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| String::from("redo")),
-                Err(_) => String::from("redo"),
-            };
-            if let Some(bt) = e
-                .iter_chain()
-                .filter_map(|f| f.backtrace().filter(|bt| !bt.is_empty()))
-                .last()
-            {
-                eprint!("Backtrace:\n{}\n\n", bt);
-            }
-            let msg = e.iter_chain().fold(String::new(), |mut s, e| {
-                use std::fmt::Write;
-                if !s.is_empty() {
-                    write!(s, ": ").unwrap();
-                }
-                write!(s, "{}", e).unwrap();
-                s
-            });
-            eprintln!("{}: {}", name, msg);
-            process::exit(1);
-        }
-    }
+    redo::run_program("redo-always", run);
 }
 
 fn run() -> Result<(), Error> {

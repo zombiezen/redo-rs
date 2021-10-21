@@ -322,11 +322,6 @@ impl JobServer {
         }
     }
 
-    #[inline]
-    pub(crate) fn is_running(&self) -> bool {
-        self.state.borrow().is_running()
-    }
-
     /// Release or destroy all the tokens we own, in preparation for exit.
     pub fn force_return_tokens(&mut self) -> Result<(), Error> {
         let mut state = self.state.borrow_mut();

@@ -104,11 +104,12 @@ impl Env {
             let mut base = Some(orig_base.clone());
             while let Some(mut b) = base {
                 b.push(".redo");
-                if b.exists() {
+                let exists = b.exists();
+                b.pop(); // .redo
+                if exists {
                     base = Some(b);
                     break;
                 }
-                b.pop(); // .redo
                 base = if b.pop() {
                     // up to parent
                     None

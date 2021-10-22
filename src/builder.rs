@@ -921,7 +921,7 @@ fn try_stat<P: AsRef<Path>>(path: P) -> io::Result<Option<Metadata>> {
 pub fn close_stdin() -> Result<(), Error> {
     use std::os::unix::io::AsRawFd;
     let f = File::open("/dev/null")?;
-    unistd::dup2(f.as_raw_fd(), io::stdin().as_raw_fd())?;
+    unistd::dup2(f.as_raw_fd(), 0)?;
     Ok(())
 }
 
@@ -1000,8 +1000,6 @@ impl StdinLogReaderBuilder {
     //
     // Then we automatically run [`logs::setup`] to send the right data format
     // to that redo-log instance.
-    //
-    // After this, be sure to run [`await_log_reader`] before exiting.
     pub fn start(&self, e: &Env) -> Result<StdinLogReader, Error> {
         use std::io::Write;
 
@@ -1031,7 +1029,7 @@ impl StdinLogReaderBuilder {
                 unistd::close(w)?;
                 LogBuilder::new()
                     .parent_logs(true)
-                    .pretty(true)
+                    .pretty(false)
                     .disable_color()
                     .setup(e, io::stderr());
                 Ok(StdinLogReader { pid, stderr_fd })

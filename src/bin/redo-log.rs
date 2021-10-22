@@ -77,12 +77,12 @@ fn run() -> Result<(), Error> {
             .context("failed write to --ack-fd")?;
     }
     let mut queue: VecDeque<&str> = VecDeque::from(targets);
+    let topdir = env::current_dir()?;
     while let Some(t) = queue.pop_front() {
         if t != "-" {
-            let topdir = env::current_dir()?;
             logs::meta(
                 "do",
-                rel(topdir, ".", t)?
+                rel(&topdir, ".", t)?
                     .as_os_str()
                     .to_str()
                     .ok_or(format_err!("cannot format target as string"))?,
@@ -252,6 +252,7 @@ impl LogState {
             if !self.status.is_empty() {
                 io::stdout().flush()?;
                 eprint!("\r{:<width$.width$}\r", "", width = width);
+                // TODO(maybe): Reuse status buffer between iterations.
                 self.status = String::new();
             }
             match Meta::parse(&line) {

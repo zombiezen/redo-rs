@@ -1,7 +1,9 @@
 use failure::Error;
 use rusqlite::TransactionBehavior;
+use std::io;
 use std::path::PathBuf;
 
+use redo::logs::LogBuilder;
 use redo::{self, DepMode, Env, ProcessState, ProcessTransaction, Stamp};
 
 fn main() {
@@ -10,7 +12,7 @@ fn main() {
 
 fn run() -> Result<(), Error> {
     let env = Env::inherit()?;
-    // TODO(soon): logs::setup
+    LogBuilder::from(&env).setup(&env, io::stderr());
 
     let mut me = PathBuf::new();
     me.push(env.startdir());

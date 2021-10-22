@@ -1,5 +1,4 @@
 use failure::{format_err, Error};
-use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::iter::FusedIterator;
 use std::mem;
@@ -7,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::str::MatchIndices;
 
-use super::env::Env;
 use super::helpers;
 use super::state::{self, DepMode, ProcessTransaction};
 
@@ -62,58 +60,72 @@ impl<'a> Iterator for DefaultDoFiles<'a> {
 
 impl<'a> FusedIterator for DefaultDoFiles<'a> {}
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DoFile {
+    /// Absolute path to the directory that the .do file is located in.
     pub(crate) do_dir: PathBuf,
+    /// Name of the .do file.
     pub(crate) do_file: OsString,
-    pub(crate) base_dir: Cow<'static, Path>,
+    /// Path of the directory that the target file is located in,
+    /// relative to the `do_dir`.
+    pub(crate) base_dir: PathBuf,
+    /// Path of the target file, relative to the `do_dir`, with `ext` stripped.
     pub(crate) base_name: PathBuf,
-    pub(crate) ext: Cow<'static, OsStr>,
+    /// Extension used for default.do matching
+    /// (i.e. `ext = ".c"` implies `do_file = "default.c.do"`).
+    pub(crate) ext: OsString,
 }
 
 /// Iterator over the list of .do files needed to build a given path.
 #[derive(Debug)]
-pub(crate) struct DoFiles<'a, 'e> {
-    state: DoFilesState<'a>,
-    base: &'e Path,
+pub(crate) struct DoFiles<B, P>
+where
+    B: AsRef<Path>,
+    P: AsRef<Path>,
+{
+    state: DoFilesState<P>,
+    base: B,
 }
 
 #[derive(Debug)]
-enum DoFilesState<'a> {
-    First(&'a Path),
+enum DoFilesState<P: AsRef<Path>> {
+    First(P),
     Recursive(RecursiveDoFilesState),
     Stopped,
 }
 
-impl<'a, 'e> DoFiles<'a, 'e> {
-    pub(crate) fn new<P: AsRef<Path>>(v: &'e Env, p: &'a P) -> DoFiles<'a, 'e> {
+impl<B: AsRef<Path>, P: AsRef<Path>> DoFiles<B, P> {
+    pub(crate) fn new(base: B, p: P) -> DoFiles<B, P> {
+        assert!(base.as_ref().is_absolute());
+        assert!(!p.as_ref().is_absolute());
         DoFiles {
-            state: DoFilesState::First(p.as_ref()),
-            base: &v.base,
+            state: DoFilesState::First(p),
+            base,
         }
     }
 }
 
-impl<'a, 'e> Iterator for DoFiles<'a, 'e> {
+impl<B: AsRef<Path>, P: AsRef<Path>> Iterator for DoFiles<B, P> {
     type Item = Result<DoFile, Error>;
 
     fn next(&mut self) -> Option<Result<DoFile, Error>> {
         match self.state {
-            DoFilesState::First(t) => {
+            DoFilesState::First(ref t) => {
+                let t = t.as_ref();
                 let result = {
-                    let dirname = t.parent().unwrap_or(t);
+                    let dirname = t.parent().unwrap_or(&t);
                     let filename = t.file_name().unwrap();
                     let mut do_file = filename.to_os_string();
                     do_file.push(".do");
                     Some(Ok(DoFile {
-                        do_dir: self.base.join(dirname),
+                        do_dir: self.base.as_ref().join(dirname),
                         do_file,
-                        base_dir: Cow::Borrowed("".as_ref()),
+                        base_dir: PathBuf::new(),
                         base_name: filename.into(),
-                        ext: Cow::Borrowed("".as_ref()),
+                        ext: OsString::new(),
                     }))
                 };
-                let norm_t = helpers::normpath(&self.base.join(t)).into_owned();
+                let norm_t = helpers::normpath(&self.base.as_ref().join(t)).into_owned();
                 self.state = DoFilesState::Recursive(RecursiveDoFilesState::new(norm_t));
                 result
             }
@@ -129,6 +141,8 @@ impl<'a, 'e> Iterator for DoFiles<'a, 'e> {
     }
 }
 
+impl<B: AsRef<Path>, P: AsRef<Path>> FusedIterator for DoFiles<B, P> {}
+
 #[derive(Debug)]
 struct RecursiveDoFilesState {
     norm_path: Pin<Box<PathBuf>>,
@@ -138,18 +152,19 @@ struct RecursiveDoFilesState {
 
 impl RecursiveDoFilesState {
     fn new(norm_path: PathBuf) -> RecursiveDoFilesState {
+        use std::iter::FromIterator;
         let norm_path = Pin::new(Box::new(norm_path));
-        let dir_bits: Vec<(*const Path, *const Path)> = {
-            let dir_bits = norm_path
-                .parent()
-                .map(|dirname| {
-                    let mut bits = path_splits(dirname);
-                    bits.reverse();
-                    bits
-                })
-                .unwrap_or_default();
-            unsafe { mem::transmute(dir_bits) }
-        };
+        let dir_bits: Vec<(*const Path, *const Path)> = norm_path
+            .parent()
+            .map(|dirname| {
+                let mut bits = path_splits(dirname);
+                bits.reverse();
+                Vec::from_iter(
+                    bits.into_iter()
+                        .map(|(dir, base)| (dir as *const Path, base as *const Path)),
+                )
+            })
+            .unwrap_or_default();
         let default_do_files =
             unsafe { RecursiveDoFilesState::default_do_files_for(&norm_path.as_ref()) };
         RecursiveDoFilesState {
@@ -160,7 +175,7 @@ impl RecursiveDoFilesState {
     }
 
     unsafe fn default_do_files_for(norm_path: &Pin<&PathBuf>) -> DefaultDoFiles<'static> {
-        // TODO(soon): Trigger error instead of panic if file_name() is non-UTF-8.
+        // TODO(someday): Trigger error instead of panic if file_name() is non-UTF-8.
         mem::transmute(DefaultDoFiles::from(
             norm_path
                 .file_name()
@@ -195,9 +210,9 @@ impl Iterator for RecursiveDoFilesState {
                 return Some(Ok(DoFile {
                     do_dir: base_dir.to_path_buf(),
                     do_file: do_file.into(),
-                    base_dir: Cow::Owned(base_dir.to_path_buf()),
+                    base_dir: sub_dir.to_path_buf(),
                     base_name: sub_dir.join(base_name),
-                    ext: Cow::Owned(ext.into()),
+                    ext: ext.into(),
                 }));
             }
             self.dir_bits.pop();
@@ -211,18 +226,21 @@ pub(crate) fn find_do_file(
     ptx: &mut ProcessTransaction,
     f: &mut state::File,
 ) -> Result<Option<DoFile>, Error> {
-    let mut created_paths: Vec<PathBuf> = Vec::new();
-    for result in DoFiles::new(ptx.state().env(), &f.name) {
+    for result in DoFiles::new(ptx.state().env().base.clone(), PathBuf::from(&f.name)) {
         let do_file = result?;
         let do_path = do_file.do_dir.join(&do_file.do_file);
+        log_debug2!(
+            "{}: {}:{} ?\n",
+            f.name,
+            do_file.do_dir.to_str().unwrap(),
+            do_file.do_file.to_str().unwrap()
+        );
         if do_path.exists() {
-            for p in created_paths {
-                f.add_dep(ptx, DepMode::Created, os_str_as_str(&p)?)?;
-            }
             f.add_dep(ptx, DepMode::Modified, os_str_as_str(&do_path)?)?;
             return Ok(Some(do_file));
+        } else {
+            f.add_dep(ptx, DepMode::Created, os_str_as_str(&do_path)?)?;
         }
-        created_paths.push(do_path);
     }
     Ok(None)
 }
@@ -239,9 +257,10 @@ fn path_splits<'a, P: AsRef<Path> + ?Sized>(p: &'a P) -> Vec<(&'a Path, &'a Path
             }
             subs.push(sub);
         }
+        subs.push(Path::new(""));
         subs
     };
-    let bases = p.ancestors().skip(1);
+    let bases = p.ancestors();
     bases.zip(subs.into_iter().rev()).collect()
 }
 
@@ -281,28 +300,116 @@ mod tests {
     }
 
     #[test]
+    fn do_files_test() {
+        use std::iter::FromIterator;
+
+        assert_eq!(
+            Vec::from_iter(
+                DoFiles::new(
+                    PathBuf::from("/src/redo-rs"),
+                    PathBuf::from("bin/redo-log.o")
+                )
+                .map(Result::unwrap)
+            ),
+            vec![
+                DoFile {
+                    do_dir: "/src/redo-rs/bin".into(),
+                    do_file: "redo-log.o.do".into(),
+                    base_dir: "".into(),
+                    base_name: "redo-log.o".into(),
+                    ext: "".into(),
+                },
+                DoFile {
+                    do_dir: "/src/redo-rs/bin".into(),
+                    do_file: "default.o.do".into(),
+                    base_dir: "".into(),
+                    base_name: "redo-log".into(),
+                    ext: ".o".into(),
+                },
+                DoFile {
+                    do_dir: "/src/redo-rs/bin".into(),
+                    do_file: "default.do".into(),
+                    base_dir: "".into(),
+                    base_name: "redo-log.o".into(),
+                    ext: "".into(),
+                },
+                DoFile {
+                    do_dir: "/src/redo-rs".into(),
+                    do_file: "default.o.do".into(),
+                    base_dir: "bin".into(),
+                    base_name: "bin/redo-log".into(),
+                    ext: ".o".into(),
+                },
+                DoFile {
+                    do_dir: "/src/redo-rs".into(),
+                    do_file: "default.do".into(),
+                    base_dir: "bin".into(),
+                    base_name: "bin/redo-log.o".into(),
+                    ext: "".into(),
+                },
+                DoFile {
+                    do_dir: "/src".into(),
+                    do_file: "default.o.do".into(),
+                    base_dir: "redo-rs/bin".into(),
+                    base_name: "redo-rs/bin/redo-log".into(),
+                    ext: ".o".into(),
+                },
+                DoFile {
+                    do_dir: "/src".into(),
+                    do_file: "default.do".into(),
+                    base_dir: "redo-rs/bin".into(),
+                    base_name: "redo-rs/bin/redo-log.o".into(),
+                    ext: "".into(),
+                },
+                DoFile {
+                    do_dir: "/".into(),
+                    do_file: "default.o.do".into(),
+                    base_dir: "src/redo-rs/bin".into(),
+                    base_name: "src/redo-rs/bin/redo-log".into(),
+                    ext: ".o".into(),
+                },
+                DoFile {
+                    do_dir: "/".into(),
+                    do_file: "default.do".into(),
+                    base_dir: "src/redo-rs/bin".into(),
+                    base_name: "src/redo-rs/bin/redo-log.o".into(),
+                    ext: "".into(),
+                },
+            ]
+        )
+    }
+
+    #[test]
     fn path_splits_test() {
         assert_eq!(
-            path_splits(Path::new("foo.txt")),
-            vec![(Path::new(""), Path::new("foo.txt")),]
-        );
-        assert_eq!(
-            path_splits(Path::new("/foo.txt")),
-            vec![(Path::new("/"), Path::new("foo.txt")),]
-        );
-        assert_eq!(
-            path_splits(Path::new("foo/bar.txt")),
+            path_splits(Path::new("foo")),
             vec![
-                (Path::new("foo"), Path::new("bar.txt")),
-                (Path::new(""), Path::new("foo/bar.txt")),
+                (Path::new("foo"), Path::new("")),
+                (Path::new(""), Path::new("foo")),
             ]
         );
         assert_eq!(
-            path_splits(Path::new("foo/bar/baz.txt")),
+            path_splits(Path::new("/foo")),
             vec![
-                (Path::new("foo/bar"), Path::new("baz.txt")),
-                (Path::new("foo"), Path::new("bar/baz.txt")),
-                (Path::new(""), Path::new("foo/bar/baz.txt")),
+                (Path::new("/foo"), Path::new("")),
+                (Path::new("/"), Path::new("foo")),
+            ]
+        );
+        assert_eq!(
+            path_splits(Path::new("foo/bar")),
+            vec![
+                (Path::new("foo/bar"), Path::new("")),
+                (Path::new("foo"), Path::new("bar")),
+                (Path::new(""), Path::new("foo/bar")),
+            ]
+        );
+        assert_eq!(
+            path_splits(Path::new("foo/bar/baz")),
+            vec![
+                (Path::new("foo/bar/baz"), Path::new("")),
+                (Path::new("foo/bar"), Path::new("baz")),
+                (Path::new("foo"), Path::new("bar/baz")),
+                (Path::new(""), Path::new("foo/bar/baz")),
             ]
         );
     }

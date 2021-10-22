@@ -89,12 +89,14 @@ use std::cell::RefCell;
 use std::cmp;
 use std::collections::{HashMap, VecDeque};
 use std::env::{self, VarError};
+use std::ffi::{OsStr, OsString};
 use std::future::Future;
 use std::iter;
 use std::os::unix::io::RawFd;
 use std::pin::Pin;
 use std::process;
 use std::rc::Rc;
+use std::str;
 use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -141,7 +143,42 @@ impl JobServer {
         const MAKEFLAGS_VAR: &str = "MAKEFLAGS";
 
         assert!(max_jobs >= 0);
-        // TODO(soon): Salute MAKEFLAGS.
+        let token_fds = match parse_makeflags(env::var_os("MAKEFLAGS").unwrap_or_default())? {
+            Some((a, b)) => {
+                if !helpers::fd_exists(a) || !helpers::fd_exists(b) {
+                    log_err!("broken --jobserver-auth from parent process:\n");
+                    log_err!("  using GNU make? prefix your Makefile rule with \"+\"\n");
+                    log_err!(
+                        "  otherwise, see https://redo.rtfd.io/en/latest/FAQParallel/#MAKEFLAGS\n"
+                    );
+                    // TODO(soon): ImmediateReturn(200)
+                    return Err(format_err!("broken --jobserver-auth from parent process"));
+                }
+                match max_jobs {
+                    0 => {
+                        // user requested zero tokens, which means use the parent jobserver
+                        // if it exists.
+                        Some((a, b))
+                    }
+                    1 => {
+                        // user requested exactly one token, which means they want to
+                        // serialize us, even if the parent redo is running in parallel.
+                        // That's pretty harmless, so allow it without a warning.
+                        None
+                    }
+                    _ => {
+                        // user requested more than one token, even though we have a parent
+                        // jobserver, which is fishy.  Warn about it, like make does.
+                        log_warn!(
+                            "warning: -j{} forced in sub-redo; starting new jobserver.\n",
+                            max_jobs
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
         let cheats = if max_jobs == 0 {
             match env::var(CHEATFDS_VAR) {
                 Ok(v) => v,
@@ -185,32 +222,40 @@ impl JobServer {
                 }
             }
         };
-        // TODO(soon): Don't start server if MAKEFLAGS is set.
-        let token_fds = make_pipe(100)?;
-        let realmax = if max_jobs == 0 { 1 } else { max_jobs };
-        let mut state = ServerState {
-            my_tokens: 1,
-            ..Default::default()
-        };
-        state.create_tokens(realmax - 1);
-        state.release_except_mine(token_fds)?;
-        let state = Rc::new(RefCell::new(state));
-        let server = JobServer {
-            params: Rc::new(ServerParams {
-                token_fds,
-                cheat_fds,
-                top_level: realmax,
+        match token_fds {
+            Some(token_fds) => Ok(JobServer {
+                params: Rc::new(ServerParams {
+                    token_fds,
+                    cheat_fds,
+                    top_level: 0,
+                }),
+                state: Rc::new(RefCell::new(ServerState::default())),
             }),
-            state,
-        };
-        env::set_var(
-            MAKEFLAGS_VAR,
-            format!(
-                " -j --jobserver-auth={0},{1} --jobserver-fds={0},{1}",
-                token_fds.0, token_fds.1
-            ),
-        );
-        Ok(server)
+            None => {
+                let token_fds = make_pipe(100)?;
+                let realmax = if max_jobs == 0 { 1 } else { max_jobs };
+                let mut state = ServerState::default();
+                state.create_tokens(realmax - 1);
+                state.release_except_mine(token_fds)?;
+                let state = Rc::new(RefCell::new(state));
+                let server = JobServer {
+                    params: Rc::new(ServerParams {
+                        token_fds,
+                        cheat_fds,
+                        top_level: realmax,
+                    }),
+                    state,
+                };
+                env::set_var(
+                    MAKEFLAGS_VAR,
+                    format!(
+                        " -j --jobserver-auth={0},{1} --jobserver-fds={0},{1}",
+                        token_fds.0, token_fds.1
+                    ),
+                );
+                Ok(server)
+            }
+        }
     }
 
     /// Get a clonable handle to the server.
@@ -359,7 +404,7 @@ impl Drop for JobServer {
 }
 
 /// Immutable information about a `JobServer`.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ServerParams {
     token_fds: (RawFd, RawFd),
     cheat_fds: (RawFd, RawFd),
@@ -367,7 +412,7 @@ struct ServerParams {
 }
 
 /// Mutable information about a `JobServer`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ServerState {
     my_tokens: i32,
     cheats: i32,
@@ -377,6 +422,20 @@ struct ServerState {
     token_wakers: VecDeque<Waker>,
 
     timers: VecDeque<(Instant, Waker)>,
+}
+
+impl Default for ServerState {
+    #[inline]
+    fn default() -> ServerState {
+        ServerState {
+            my_tokens: 1,
+            cheats: 0,
+            wait_fds: HashMap::new(),
+            token_ready: false,
+            token_wakers: VecDeque::new(),
+            timers: VecDeque::new(),
+        }
+    }
 }
 
 impl ServerState {
@@ -482,6 +541,7 @@ impl JobServerHandle {
         match unsafe { unistd::fork()? } {
             ForkResult::Child => {
                 if let Err(e) = unistd::close(r) {
+                    log_err!("close read end of pipe: {}\n", e);
                     process::exit(201);
                 }
                 process::exit(job_func());
@@ -888,6 +948,50 @@ fn write_tokens(fd: RawFd, n: usize) -> nix::Result<()> {
     Ok(())
 }
 
+fn parse_makeflags<S: AsRef<OsStr>>(flags: S) -> Result<Option<(RawFd, RawFd)>, Error> {
+    use failure::ResultExt;
+    use std::os::unix::ffi::OsStrExt;
+
+    let flags = flags.as_ref();
+    let flags = {
+        let mut new_flags = OsString::with_capacity(flags.len() + 2 * OsStr::new(" ").len());
+        new_flags.push(" ");
+        new_flags.push(flags);
+        new_flags.push(" ");
+        new_flags
+    };
+    let flags = flags.as_bytes();
+    const FIND1: &[u8] = b" --jobserver-auth="; // renamed in GNU make 4.2
+    const FIND2: &[u8] = b" --jobserver-fds="; // fallback syntax
+    let find = flags
+        .windows(FIND1.len())
+        .position(|w| w == FIND1)
+        .map(|i| (FIND1, i))
+        .or_else(|| {
+            flags
+                .windows(FIND2.len())
+                .position(|w| w == FIND2)
+                .map(|i| (FIND2, i))
+        });
+    match find {
+        Some((find, ofs)) => {
+            let s = &flags[ofs + find.len()..];
+            let arg = str::from_utf8(&s[..s.iter().copied().position(|b| b == b' ').unwrap()])
+                .context("invalid MAKEFLAGS")?;
+            let comma = match arg.find(',') {
+                Some(i) => i,
+                None => return Err(format_err!("invalid --jobserver-auth: {}", arg)),
+            };
+            let a = str::parse::<RawFd>(&arg[..comma])
+                .with_context(|_| format!("invalid --jobserver-auth: {}", arg))?;
+            let b = str::parse::<RawFd>(&arg[comma + 1..])
+                .with_context(|_| format!("invalid --jobserver-auth: {}", arg))?;
+            Ok(Some((a, b)))
+        }
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -942,6 +1046,23 @@ mod tests {
             "start={:?}, awake={:?}",
             start,
             awake
+        );
+    }
+
+    #[test]
+    fn parse_makeflags_test() {
+        assert_eq!(parse_makeflags("").unwrap(), None);
+        assert_eq!(
+            parse_makeflags("--jobserver-auth=1,2").unwrap(),
+            Some((1, 2))
+        );
+        assert_eq!(
+            parse_makeflags("--jobserver-fds=1,2").unwrap(),
+            Some((1, 2))
+        );
+        assert_eq!(
+            parse_makeflags("--jobserver-fds=1,2 --jobserver-auth=3,4").unwrap(),
+            Some((3, 4))
         );
     }
 }

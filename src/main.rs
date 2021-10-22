@@ -69,7 +69,7 @@ fn run() -> Result<(), Error> {
     if redo::auto_bool_arg(&matches, "debug-pids").unwrap_or(false) {
         std::env::set_var("REDO_DEBUG_PIDS", "1");
     }
-    let set_defint = |name: &str, val: OptionalBool| {
+    fn set_defint(name: &str, val: OptionalBool) {
         std::env::set_var(
             name,
             std::env::var_os(name).unwrap_or_else(|| {
@@ -80,7 +80,7 @@ fn run() -> Result<(), Error> {
                 })
             }),
         );
-    };
+    }
     set_defint("REDO_LOG", redo::auto_bool_arg(&matches, "log"));
     set_defint("REDO_PRETTY", redo::auto_bool_arg(&matches, "pretty"));
     set_defint("REDO_COLOR", redo::auto_bool_arg(&matches, "color"));

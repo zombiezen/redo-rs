@@ -425,7 +425,7 @@ fn is_locked(ps: &ProcessState, fid: Option<i32>) -> Result<bool, Error> {
     };
     // This acquires and immediately releases the lock (via Drop).
     let mut lock = ps.new_lock(fid);
-    Ok(lock.try_lock()?)
+    Ok(!lock.try_lock()?)
 }
 
 fn rel<P1, P2, P3>(top: P1, mydir: P2, path: P3) -> io::Result<PathBuf>

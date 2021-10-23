@@ -102,6 +102,7 @@ impl BuildJob<'_> {
         debug_assert!(self.lock.is_owned());
         let t = self.t;
         let mut sf = self.sf;
+        let lock = self.lock;
 
         let newstamp = sf.read_stamp(ptx.state().env())?;
         if sf.is_generated()
@@ -375,6 +376,7 @@ impl BuildJob<'_> {
         })?;
         let out_file = out_file.take().unwrap();
         Ok(Box::pin(async move {
+            let _lock = lock; // ensure we hold the lock until after state has been recorded
             let mut rv = job.await;
             let mut ps = ps_ref.borrow_mut();
             let mut ptx = match ProcessTransaction::new(*ps, TransactionBehavior::Deferred) {
@@ -441,7 +443,7 @@ impl BuildJob<'_> {
             None,
         );
         let state = ptx.commit()?;
-        Ok(Box::pin(server.start(|| {
+        let job = server.start(|| {
             env::set_var("REDO_DEPTH", {
                 let mut depth = state.env().depth().to_string();
                 depth.push_str("  ");
@@ -453,7 +455,13 @@ impl BuildJob<'_> {
             let _ = unistd::execvp(&argv[0], argv.as_slice());
             // Returns only if execvp failed.
             1
-        })?))
+        })?;
+        let lock = self.lock;
+        Ok(Box::pin(async move {
+            let _lock = lock; // ensure we hold the lock until after the job has finished
+            let rv = job.await;
+            rv
+        }))
     }
 
     /// After a subtask finishes, handle its changes to the output file.

@@ -73,8 +73,8 @@ impl ProcessState {
             lockfile.push("locks");
             lockfile
         };
-        let lock_manager = Rc::new(LockManager::open(lockfile)?);
-        if e.is_toplevel() && LockManager::detect_broken_locks(&lock_manager)? {
+        let lock_manager = LockManager::open(lockfile)?;
+        if e.is_toplevel() && LockManager::detect_broken_locks(lock_manager.clone())? {
             e.mark_locks_broken();
         }
         let dbfile = {
@@ -975,17 +975,17 @@ pub(crate) struct LockManager {
 }
 
 impl LockManager {
-    pub(crate) fn open<P: AsRef<Path>>(path: P) -> Result<LockManager, Error> {
+    pub(crate) fn open<P: AsRef<Path>>(path: P) -> Result<Rc<LockManager>, Error> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(path)?;
         helpers::close_on_exec(file.as_raw_fd(), true)?;
-        Ok(LockManager {
+        Ok(Rc::new(LockManager {
             file,
             locks: RefCell::new(HashSet::new()),
-        })
+        }))
     }
 
     /// Detect Windows WSL's completely broken `fcntl()` locks.
@@ -997,8 +997,9 @@ impl LockManager {
     /// Bug exists at least in WSL "4.4.0-17134-Microsoft #471-Microsoft".
     ///
     /// Returns `true` if broken, `false` otherwise.
-    pub(crate) fn detect_broken_locks(manager: &Rc<LockManager>) -> nix::Result<bool> {
-        let mut pl = Lock::new(manager.clone(), 0);
+    pub(crate) fn detect_broken_locks(manager: Rc<LockManager>) -> nix::Result<bool> {
+        let child_manager_ref = manager.clone();
+        let mut pl = Lock::new(manager, 0);
         // We wait for the lock here, just in case others are doing
         // this test at the same time.
         pl.wait_lock(LockType::Exclusive)?;
@@ -1010,9 +1011,11 @@ impl LockManager {
             },
             Ok(ForkResult::Child) => {
                 // Doesn't actually unlock, since child process doesn't own it.
-                let _ = pl.unlock();
+                if let Err(_) = pl.unlock() {
+                    process::exit(99);
+                }
                 mem::drop(pl);
-                let mut cl = Lock::new(manager.clone(), 0);
+                let mut cl = Lock::new(child_manager_ref, 0);
                 // parent is holding lock, which should prevent us from getting it.
                 match cl.try_lock() {
                     Ok(true) => {
@@ -1071,6 +1074,7 @@ impl Lock {
     /// Check that this lock is in a sane state.
     pub(crate) fn check(&self) {
         assert!(!self.owned);
+        // TODO(soon): cycles.check(self.fid)
     }
 
     #[inline]

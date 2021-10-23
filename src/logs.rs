@@ -362,25 +362,20 @@ pub fn debug_level() -> i32 {
 /// If `s` contains a `'\n'` character.
 pub fn write(line: &str) {
     assert!(!line.contains('\n'));
-    let logged = {
+    {
         let mut logger = GLOBAL_LOGGER
             .lock()
             .expect("previous call to logger failed");
         let logger: &mut Option<Box<dyn Logger + Send>> = &mut *logger;
-        match logger {
-            Some(logger) => {
-                logger.write_line(line);
-                true
-            }
-            None => false,
+        if let Some(logger) = logger {
+            logger.write_line(line);
+            return;
         }
-    };
-    if !logged {
-        // Fallback to stderr.
-        let escapes = check_tty(AsRawFd::as_raw_fd(&io::stderr()), OptionalBool::Off);
-        let mut logger = PrettyLog::new(io::stderr(), escapes, PrettyLogConfig::default());
-        logger.write_line(line);
     }
+    // Fallback to stderr.
+    let escapes = check_tty(AsRawFd::as_raw_fd(&io::stderr()), OptionalBool::Off);
+    let mut logger = PrettyLog::new(io::stderr(), escapes, PrettyLogConfig::default());
+    logger.write_line(line);
 }
 
 /// Write a structured log-line to the process-wide logger.

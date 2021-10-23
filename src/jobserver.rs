@@ -143,7 +143,7 @@ impl JobServer {
         const MAKEFLAGS_VAR: &str = "MAKEFLAGS";
 
         assert!(max_jobs >= 0);
-        let token_fds = match parse_makeflags(env::var_os("MAKEFLAGS").unwrap_or_default())? {
+        let token_fds = match parse_makeflags(env::var_os(MAKEFLAGS_VAR).unwrap_or_default())? {
             Some((a, b)) => {
                 if !helpers::fd_exists(a) || !helpers::fd_exists(b) {
                     log_err!("broken --jobserver-auth from parent process:\n");
@@ -996,6 +996,8 @@ fn parse_makeflags<S: AsRef<OsStr>>(flags: S) -> Result<Option<(RawFd, RawFd)>, 
 mod tests {
     use super::*;
 
+    // TODO(soon): Set/unset MAKEFLAGS during tests
+
     #[test]
     fn start_job() {
         let mut server = JobServer::setup(1).unwrap();
@@ -1063,6 +1065,10 @@ mod tests {
         assert_eq!(
             parse_makeflags("--jobserver-fds=1,2 --jobserver-auth=3,4").unwrap(),
             Some((3, 4))
+        );
+        assert_eq!(
+            parse_makeflags(" -j --jobserver-auth=1,2 --jobserver-fds=3,4").unwrap(),
+            Some((1, 2)),
         );
     }
 }

@@ -350,7 +350,7 @@ impl BuildJob<'_> {
                 }
             } else {
                 env::remove_var("REDO_LOG_INODE");
-                env::set_var("REDO_LOG", "");
+                env::set_var("REDO_LOG", "0");
             }
             if unsafe { signal::signal(Signal::SIGPIPE, SigHandler::SigDfl) }.is_err() {
                 return 1;

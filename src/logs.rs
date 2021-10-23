@@ -345,7 +345,10 @@ impl<T: Write + AsRawFd> WriteWithMaybeFd for T {
     }
 }
 
-static DEBUG_LEVEL: AtomicI32 = AtomicI32::new(0);
+/// Global debug level (used for `log_*` macros).
+///
+/// Defaults to 3 before set up to help debug early startup.
+static DEBUG_LEVEL: AtomicI32 = AtomicI32::new(3);
 
 /// Return the currently configured global debug level.
 #[inline]
@@ -372,9 +375,19 @@ pub fn write(line: &str) {
             return;
         }
     }
-    // Fallback to stderr.
+    // Fallback to stderr, showing everything.
+    // This is helpful for debugging early startup.
     let escapes = check_tty(AsRawFd::as_raw_fd(&io::stderr()), OptionalBool::Off);
-    let mut logger = PrettyLog::new(io::stderr(), escapes, PrettyLogConfig::default());
+    let mut logger = PrettyLog::new(
+        io::stderr(),
+        escapes,
+        PrettyLogConfig {
+            debug: 3,
+            debug_locks: true,
+            debug_pids: true,
+            ..PrettyLogConfig::default()
+        },
+    );
     logger.write_line(line);
 }
 

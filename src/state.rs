@@ -1195,16 +1195,21 @@ pub(crate) fn target_relpath<P: AsRef<Path>>(env: &Env, t: P) -> io::Result<Path
     let cwd = std::env::current_dir()?;
     let rel_dofile_dir = env.startdir().join(env.pwd());
     let dofile_dir = helpers::abs_path(&cwd, &rel_dofile_dir);
-    let target = dofile_dir.join(env.target());
-    let target_dir = helpers::abs_path(
-        &cwd,
-        target.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid target path (no directory)",
-            )
-        })?,
-    );
+    let target_dir = if env.target().as_os_str().is_empty() {
+        dofile_dir.into_owned()
+    } else {
+        dofile_dir
+            .join(env.target())
+            .parent()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid target path (no directory)",
+                )
+            })?
+            .to_path_buf()
+    };
+    let target_dir = helpers::abs_path(&cwd, &target_dir);
     relpath(t, target_dir)
 }
 

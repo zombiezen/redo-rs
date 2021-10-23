@@ -255,7 +255,7 @@ impl LogState {
                 // TODO(maybe): Reuse status buffer between iterations.
                 self.status = String::new();
             }
-            match Meta::parse(&line) {
+            match Meta::parse(line.trim_end_matches('\n')) {
                 Ok(g) => {
                     // FIXME: print prefix if @@REDO is not at start of line.
                     //   logs::PrettyLog does it, but only if we actually call .write().

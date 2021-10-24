@@ -505,7 +505,7 @@ impl BuildJob<'_> {
         let mut st2 = try_stat(tmp_name).expect("unexpected error when statting $3");
         let modified = match after_t {
             Some(after_t) => {
-                after_t.is_dir()
+                !after_t.is_dir()
                     && match before_t {
                         Some(before_t) => match (before_t.modified(), after_t.modified()) {
                             (Ok(before_mod), Ok(after_mod)) => before_mod != after_mod,

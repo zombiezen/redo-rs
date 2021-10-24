@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["Ross Light <ross@zombiezen.com>"]
 edition = "2018"
 
+[features]
+debug-jobserver = []
+
 [dependencies]
 clap = { version = "~2.27.0", default-features = false }
 common-path = "1.0.0"

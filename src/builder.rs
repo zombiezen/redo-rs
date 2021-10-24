@@ -269,7 +269,7 @@ impl BuildJob<'_> {
         // Rust can't tell that the closure is not called in the parent process.
         let out_file = Cell::new(Some(out_file));
 
-        let job = server.start(|| {
+        let job = server.start(t.clone(), || {
             // TODO(someday): Log errors.
             use std::iter::FromIterator;
 
@@ -443,7 +443,7 @@ impl BuildJob<'_> {
             None,
         );
         let state = ptx.commit()?;
-        let job = server.start(|| {
+        let job = server.start(self.t, || {
             env::set_var("REDO_DEPTH", {
                 let mut depth = state.env().depth().to_string();
                 depth.push_str("  ");

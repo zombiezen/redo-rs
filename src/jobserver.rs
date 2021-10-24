@@ -74,7 +74,6 @@
 
 use failure::{format_err, Error};
 use futures::future::FusedFuture;
-use futures::stream::Stream;
 use futures::task;
 use futures::{pin_mut, select};
 use libc::{self, c_int, timeval};
@@ -103,9 +102,34 @@ use std::time::{Duration, Instant};
 
 use super::helpers::{self, IntervalTimer, IntervalTimerValue};
 
+#[cfg(feature = "debug-jobserver")]
+macro_rules! debug_jobserver {
+    ($($arg:tt)*) => {{
+        let s = format!($($arg)*);
+        eprintln!("job#{}: {}", ::std::process::id(), s);
+    }}
+}
+
+#[cfg(all(not(feature = "debug-jobserver"), not(debug_assertions)))]
+macro_rules! debug_jobserver {
+    ($($arg:tt)*) => {};
+}
+
+#[cfg(all(not(feature = "debug-jobserver"), debug_assertions))]
+macro_rules! debug_jobserver {
+    ($($arg:expr),*) => {{
+        $(
+            {
+                let _ = $arg;
+            }
+        )*
+    }};
+}
+
 /// Metadata about a running job.
 #[derive(Debug)]
 pub(crate) struct Job {
+    name: String,
     pid: Pid,
     state: Rc<RefCell<JobState>>,
 }
@@ -143,6 +167,7 @@ impl JobServer {
         const MAKEFLAGS_VAR: &str = "MAKEFLAGS";
 
         assert!(max_jobs >= 0);
+        debug_jobserver!("setup({})", max_jobs);
         let token_fds = match parse_makeflags(env::var_os(MAKEFLAGS_VAR).unwrap_or_default())? {
             Some((a, b)) => {
                 if !helpers::fd_exists(a) || !helpers::fd_exists(b) {
@@ -272,6 +297,8 @@ impl JobServer {
         E: Into<Error>,
         F: Future<Output = Result<T, E>>,
     {
+        use std::iter::FromIterator;
+
         // TODO(someday): Prevent calling recursively.
         let mut rfds: FdSet = FdSet::new();
         let waker = task::noop_waker();
@@ -288,13 +315,21 @@ impl JobServer {
 
                     // If there are any timers that have triggered during the run, don't
                     // bother waiting on I/O. Wake their futures immediately.
-                    let mut timers_fired = false;
+                    let mut woke_immediates = false;
                     while state.timers.front().map_or(false, |&(fire, _)| fire < now) {
                         let (_, w) = state.timers.pop_front().unwrap();
                         w.wake();
-                        timers_fired = true;
+                        woke_immediates = true;
                     }
-                    if timers_fired {
+                    // Similarly, if there are any EnsureToken futures that can be awoken,
+                    // do so immediately.
+                    if state.my_tokens >= 1 {
+                        if let Some((_, w)) = state.token_wakers.pop_front() {
+                            w.wake();
+                            woke_immediates = true;
+                        }
+                    }
+                    if woke_immediates {
                         continue;
                     }
 
@@ -309,6 +344,7 @@ impl JobServer {
                     if rfds.highest().is_none() {
                         // No I/O to wait on.
                         if let Some(d) = next_timer_duration {
+                            debug_jobserver!("idling for {:?}", d);
                             thread::sleep(d);
                             continue;
                         }
@@ -316,16 +352,41 @@ impl JobServer {
                     }
                     let mut max_delay: Option<TimeVal> =
                         next_timer_duration.map(|d| helpers::timeval_from_duration(d).into());
+                    debug_jobserver!(
+                        "{},{} token_fds={:?}; jfds={:?}; token_wakers={:?}; r={:?}",
+                        state.my_tokens,
+                        state.cheats,
+                        self.params.token_fds,
+                        Vec::from_iter(state.wait_fds.keys().copied()),
+                        Vec::from_iter(state.token_wakers.iter().map(|&(id, _)| id)),
+                        Vec::from_iter(rfds.fds(None))
+                    );
                     select::select(None, Some(&mut rfds), None, None, max_delay.as_mut())?;
+                    debug_jobserver!("readable: {:?}", Vec::from_iter(rfds.fds(None)));
 
                     for fd in rfds.fds(None) {
                         if fd == self.params.token_fds.0 {
-                            if let Some(w) = state.token_wakers.pop_front() {
-                                state.token_ready = true;
-                                w.wake();
+                            let mut b: [u8; 1] = [0];
+                            match try_read(self.params.token_fds.0, &mut b)? {
+                                Some(0) => {
+                                    return Err(format_err!("unexpected EOF on token read"));
+                                }
+                                Some(1) => {
+                                    state.my_tokens += 1;
+                                    debug_jobserver!("read a token ({:?}).", &b);
+                                    if let Some((_, w)) = state.token_wakers.pop_front() {
+                                        w.wake();
+                                    }
+                                    break;
+                                }
+                                Some(_) => unreachable!("only reading 1 byte"),
+                                None => {
+                                    // Token may have been stolen.
+                                }
                             }
                             continue;
                         }
+                        debug_jobserver!("done: {}", &state.wait_fds[&fd].name);
                         // redo subprocesses are expected to die without releasing their
                         // tokens, so things are less likely to get confused if they
                         // die abnormally.  Since a child has died, that means a token has
@@ -335,6 +396,7 @@ impl JobServer {
                             Ok(Some(1)) => {
                                 // someone exited with _cheats > 0, so we need to compensate
                                 // by *not* re-creating a token now.
+                                debug_jobserver!("EAT cheatfd {:?}", &b);
                             }
                             Ok(None) | Ok(Some(0)) => {
                                 state.create_tokens(1);
@@ -354,6 +416,7 @@ impl JobServer {
                             WaitStatus::Signaled(_, signal, _) => -(signal as i32),
                             _ => return Err(format_err!("unhandled process status: {:?}", rv)),
                         };
+                        debug_jobserver!("done1: rv={}", status);
                         {
                             let mut state = pd.state.borrow_mut();
                             state.exit_code = Some(status);
@@ -371,6 +434,12 @@ impl JobServer {
     pub fn force_return_tokens(&mut self) -> Result<(), Error> {
         let mut state = self.state.borrow_mut();
         let n = state.wait_fds.len();
+        debug_jobserver!(
+            "{},{} -> {} jobs left in force_return_tokens",
+            state.my_tokens,
+            state.cheats,
+            n
+        );
         state.wait_fds.clear();
         state.create_tokens(n as i32);
         if state.has_token() {
@@ -390,6 +459,11 @@ impl JobServer {
         );
         if state.cheats > 0 {
             let cheats = state.cheats;
+            debug_jobserver!(
+                "{},{} -> force_return_tokens: recovering final token",
+                state.my_tokens,
+                cheats
+            );
             state.destroy_tokens(cheats);
             write_tokens(self.params.cheat_fds.1, state.cheats as usize)?;
         }
@@ -418,8 +492,8 @@ struct ServerState {
     cheats: i32,
     wait_fds: HashMap<RawFd, Job>,
 
-    token_ready: bool,
-    token_wakers: VecDeque<Waker>,
+    next_token_stream_id: i64,
+    token_wakers: VecDeque<(i64, Waker)>,
 
     timers: VecDeque<(Instant, Waker)>,
 }
@@ -431,7 +505,7 @@ impl Default for ServerState {
             my_tokens: 1,
             cheats: 0,
             wait_fds: HashMap::new(),
-            token_ready: false,
+            next_token_stream_id: 0,
             token_wakers: VecDeque::new(),
             timers: VecDeque::new(),
         }
@@ -475,6 +549,7 @@ impl ServerState {
     fn release(&mut self, token_fds: (RawFd, RawFd), n: i32) -> nix::Result<()> {
         assert!(n >= 0);
         assert!(self.my_tokens >= n);
+        debug_jobserver!("{},{} -> release({})", self.my_tokens, self.cheats, n);
         let mut n_to_share = 0usize;
         for _ in 0..n {
             self.my_tokens -= 1;
@@ -487,6 +562,7 @@ impl ServerState {
         assert!(self.my_tokens >= 0);
         assert!(self.cheats >= 0);
         if n_to_share > 0 {
+            debug_jobserver!("PUT tokenfds {}", n_to_share);
             write_tokens(token_fds.1, n_to_share)?;
         }
         Ok(())
@@ -499,6 +575,7 @@ impl ServerState {
 
     fn release_mine(&mut self, token_fds: (RawFd, RawFd)) -> nix::Result<()> {
         assert!(self.my_tokens >= 1);
+        debug_jobserver!("{},{} -> release_mine()", self.my_tokens, self.cheats);
         self.release(token_fds, 1)
     }
 }
@@ -526,7 +603,7 @@ impl JobServerHandle {
     /// # Panics
     ///
     /// If `has_token()` returns `false`.
-    pub(crate) fn start<F>(&self, job_func: F) -> Result<Job, Error>
+    pub(crate) fn start<F>(&self, reason: String, job_func: F) -> Result<Job, Error>
     where
         F: FnOnce() -> i32,
     {
@@ -544,7 +621,9 @@ impl JobServerHandle {
                     log_err!("close read end of pipe: {}\n", e);
                     process::exit(201);
                 }
-                process::exit(job_func());
+                let rv = job_func();
+                debug_jobserver!("exit: {}", rv);
+                process::exit(rv);
             }
             ForkResult::Parent { child: pid } => {
                 helpers::close_on_exec(r, true)?;
@@ -553,11 +632,13 @@ impl JobServerHandle {
                 self.state.borrow_mut().wait_fds.insert(
                     r,
                     Job {
+                        name: reason,
                         pid,
                         state: job_state.clone(),
                     },
                 );
                 Ok(Job {
+                    name: String::new(), // doesn't get used
                     pid,
                     state: job_state,
                 })
@@ -575,54 +656,22 @@ impl JobServerHandle {
         }
     }
 
-    /// Don't return until this process has a job token.
+    /// Return a future that blocks until this process has a job token.
     ///
     /// - `reason`: the reason (for debugging purposes) we need a token.  Usually
     ///   the name of a target we want to build.
-    ///
-    /// `has_token` will report `true` after this function returns with `Ok`.
-    async fn ensure_token(&self, _reason: &str) -> Result<(), Error> {
-        use futures::stream::StreamExt;
-
-        let mut token_stream = TokenStream {
+    fn ensure_token<'a>(&self, reason: &'a str) -> EnsureToken<'a> {
+        EnsureToken {
+            id: {
+                let mut state = self.state.borrow_mut();
+                let id = state.next_token_stream_id;
+                state.next_token_stream_id += 1;
+                id
+            },
+            reason,
+            future_state: EnsureTokenState::default(),
             state: self.state.clone(),
-        };
-        assert!(self.state.borrow().my_tokens <= 1);
-        loop {
-            {
-                let state = self.state.borrow();
-                if state.my_tokens >= 1 {
-                    debug_assert_eq!(state.my_tokens, 1);
-                    break;
-                }
-                debug_assert!(state.my_tokens < 1);
-            }
-            token_stream.next().await;
-            {
-                let state = self.state.borrow();
-                if state.my_tokens >= 1 {
-                    break;
-                }
-                debug_assert!(state.my_tokens < 1);
-            }
-            let mut b: [u8; 1] = [0];
-            match try_read(self.params.token_fds.0, &mut b)? {
-                Some(0) => {
-                    return Err(format_err!("unexpected EOF on token read"));
-                }
-                Some(1) => {
-                    let mut state = self.state.borrow_mut();
-                    state.my_tokens += 1;
-                    break;
-                }
-                Some(_) => unreachable!("only reading 1 byte"),
-                None => {
-                    // Token may have been stolen.
-                }
-            }
         }
-        debug_assert!(self.state.borrow().my_tokens <= 1);
-        Ok(())
     }
 
     /// Wait for a job token to become available, or cheat if possible.
@@ -646,8 +695,6 @@ impl JobServerHandle {
     where
         C: FnMut() -> Result<i32, Error>,
     {
-        use futures::future::FutureExt;
-
         let mut backoff = Duration::from_millis(10);
         while !self.has_token() {
             loop {
@@ -660,15 +707,14 @@ impl JobServerHandle {
                 // If we already have a subproc running, then effectively we
                 // already have a token.  Don't create a cheater token unless
                 // we're completely idle.
-                self.ensure_token(reason).await?;
+                self.ensure_token(reason).await;
             }
-            let token_future = self.ensure_token(reason).fuse();
-            let mut token_future = Box::pin(token_future);
-            let mut timeout = self.sleep(cmp::min(Duration::from_secs(1), backoff)).fuse();
+            let mut token_future = self.ensure_token(reason);
+            let mut timeout = self.sleep(cmp::min(Duration::from_secs(1), backoff));
             let got_token = select! {
-                res = token_future => res.map(|_| true),
-                _ = timeout => Ok(false),
-            }?;
+                _ = token_future => true,
+                _ = timeout => false,
+            };
             if got_token {
                 return Ok(());
             }
@@ -684,6 +730,13 @@ impl JobServerHandle {
                 };
                 if !has_token {
                     let n = cheat_func()?;
+                    // TODO(maybe): Switch direct environment variable access with Env field.
+                    debug_jobserver!(
+                        "{}: {}: cheat = {}",
+                        env::var("REDO_TARGET").unwrap_or_default(),
+                        reason,
+                        n
+                    );
                     if n > 0 {
                         let mut state = self.state.borrow_mut();
                         state.my_tokens += n;
@@ -698,6 +751,11 @@ impl JobServerHandle {
 
     /// Return a future that complets when all running jobs are finished.
     pub(crate) fn wait_all(&self) -> AllJobsDone {
+        debug_jobserver!(
+            "{},{} -> wait_all",
+            self.state.borrow().my_tokens,
+            self.state.borrow().cheats
+        );
         AllJobsDone {
             params: self.params.clone(),
             done: false,
@@ -783,6 +841,7 @@ impl Future for AllJobsDone {
             }
         }
         if !self.state.borrow().is_running() {
+            debug_jobserver!("wait_all: empty list");
             self.done = true;
             if self.params.top_level != 0 {
                 // If we're the toplevel and we're sure no child processes remain,
@@ -810,6 +869,7 @@ impl Future for AllJobsDone {
                         return Poll::Ready(Err(e.into()));
                     }
                 };
+                debug_jobserver!("toplevel: GOT {} tokens and {} cheats", tokens, cheats);
                 if (tokens - cheats) as i32 != self.params.top_level {
                     return Poll::Ready(Err(format_err!(
                         "on exit: expected {} tokens; found {}-{}",
@@ -832,12 +892,13 @@ impl Future for AllJobsDone {
         // holding a token, and if we have no children left, we might be
         // about to terminate.
         if self.state.borrow().my_tokens >= 1 {
-            self.done = true;
             let res = self.state.borrow_mut().release_mine(self.params.token_fds);
             if let Err(e) = res {
+                self.done = true;
                 return Poll::Ready(Err(e.into()));
             }
         }
+        debug_jobserver!("wait_all: wait()");
         // TODO(someday): Store waker
         Poll::Pending
     }
@@ -859,33 +920,78 @@ impl Clone for AllJobsDone {
     }
 }
 
-/// A stream for `tokens_fds.0` becoming readable.
-///
-/// Does not actually read `token_fds.0` once it's readable, so someone else
-/// might read it before us.
+/// A future that polls the jobserver until it has a job token.
 #[derive(Debug)]
-struct TokenStream {
+struct EnsureToken<'a> {
+    id: i64,
+    future_state: EnsureTokenState,
+    reason: &'a str,
     state: Rc<RefCell<ServerState>>,
 }
 
-impl Stream for TokenStream {
-    type Item = ();
+impl Future for EnsureToken<'_> {
+    type Output = ();
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<()>> {
-        let mut state = self.state.borrow_mut();
-        if state.token_ready {
-            state.token_ready = false;
-            Poll::Ready(Some(()))
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.future_state == EnsureTokenState::Terminated {
+            return Poll::Ready(());
+        }
+        let my_tokens = {
+            let mut state = self.state.borrow_mut();
+            state.token_wakers.retain(|&(id, _)| id != self.id);
+            state.my_tokens
+        };
+        if my_tokens >= 1 {
+            match self.future_state {
+                EnsureTokenState::New => {
+                    debug_jobserver!("my_tokens is {}", my_tokens);
+                    assert_eq!(my_tokens, 1);
+                    debug_jobserver!("({}) used my own token...", self.reason);
+                }
+                EnsureTokenState::Polling => {
+                    debug_jobserver!("({}) got a token.", self.reason);
+                }
+                _ => unreachable!("terminated peeled off"),
+            }
+            self.future_state = EnsureTokenState::Terminated;
+            Poll::Ready(())
         } else {
-            // TODO(someday): Replace any old wakers in the queue. For now, using FILO.
-            // TODO(someday): Drop any old wakers in the queue when dropped.
-            state.token_wakers.push_front(cx.waker().clone());
+            if self.future_state == EnsureTokenState::New {
+                debug_jobserver!("({}) waiting for tokens...", self.reason);
+                self.future_state = EnsureTokenState::Polling;
+            }
+            let mut state = self.state.borrow_mut();
+            state.token_wakers.push_front((self.id, cx.waker().clone()));
             Poll::Pending
         }
     }
+}
 
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, None)
+impl FusedFuture for EnsureToken<'_> {
+    fn is_terminated(&self) -> bool {
+        self.future_state == EnsureTokenState::Terminated
+    }
+}
+
+impl Drop for EnsureToken<'_> {
+    fn drop(&mut self) {
+        let mut state = self.state.borrow_mut();
+        state.token_wakers.retain(|&(id, _)| id != self.id);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum EnsureTokenState {
+    New = 0,
+    Polling = 1,
+    Terminated = 2,
+}
+
+impl Default for EnsureTokenState {
+    #[inline]
+    fn default() -> Self {
+        EnsureTokenState::New
     }
 }
 
@@ -1001,7 +1107,7 @@ mod tests {
     #[test]
     fn start_job() {
         let mut server = JobServer::setup(1).unwrap();
-        let job = server.handle().start(|| 4).unwrap();
+        let job = server.handle().start("foo".into(), || 4).unwrap();
         let rv = server
             .block_on(async { Result::<_, Error>::Ok(job.await) })
             .unwrap();
@@ -1033,7 +1139,7 @@ mod tests {
         const SLEEP_DURATION: Duration = Duration::from_millis(100);
         let job = server
             .handle()
-            .start(|| {
+            .start("foo".into(), || {
                 thread::sleep(SLEEP_DURATION + SLEEP_DURATION);
                 4
             })

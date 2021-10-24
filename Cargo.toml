@@ -20,7 +20,7 @@ libc = "0.2.67"
 libsqlite3-sys = "0.17.1"
 nix = "0.21.0"
 rand = "0.8.4"
-rusqlite = "0.21.0"
+rusqlite = { version = "0.21.0", features = ["bundled"] }
 tempfile = "3.2.0"
 term_size = "0.3.2"
 zombiezen-const-cstr = "1.0"

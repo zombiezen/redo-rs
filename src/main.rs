@@ -137,7 +137,7 @@ fn run() -> Result<(), Error> {
     if j < 0 || j > 1000 {
         return Err(format_err!("invalid --jobs value: {}", j));
     }
-    let mut server = JobServer::setup(1)?;
+    let mut server = JobServer::setup(j)?;
     assert!(ps.is_flushed());
     let build_result = server.block_on(builder::run(
         &mut ps,

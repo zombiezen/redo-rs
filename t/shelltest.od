@@ -1,0 +1,548 @@
+#
+# Most of these tests were inspired by:
+# http://www.gnu.org/software/hello/manual/autoconf/Shell-Substitutions.html
+#
+# Note that this file isn't exactly a test for POSIX compliance.  It's a test
+# for usefulness-compliance, that is, interpreting POSIX in a particular way
+# for consistency, so that users of redo can depend on all the following
+# functionality.
+#
+# Where POSIX makes a clear statement about something working a particular
+# way, POSIX wins.  But where POSIX is unclear on a point, I don't mind
+# picking a particular way and requiring it here, if that makes writing
+# scripts easier for everyone in the future.
+#
+exec >&2
+set +e
+
+: ${SHELLTEST_QUIET:=}
+
+rm -f shelltest.failed shelltest.warned
+
+fail()
+{
+	echo "  failed: $1"
+	: >shelltest.failed
+}
+
+warn()
+{
+	echo "  warning: $1"
+	: >shelltest.warned
+}
+
+# For things that should be a warning, but which are just too common
+skip()
+{
+	echo "  skip: $1"
+}
+
+quiet_stderr()
+{
+	if [ -n "$SHELLTEST_QUIET" ]; then
+		"$@" 2>/dev/null
+	else
+		"$@"
+	fi
+}
+
+(
+	x="/a/b/c/"
+	IFS=/
+	f() {
+		[ "$2" = "a" ] || fail 2
+		[ "$#" = "4" ] || warn 2a
+	}
+	f $x
+)
+
+name=foo.o.o
+ext=.o
+[ "${name#foo.o}" = ".o" ] || fail 3
+
+
+spacey="this has * and spaces"
+case $spacey in
+	*)	spaceout=$name$spacey ;;
+esac
+[ "$spaceout" = "$name$spacey" ] || fail 4
+
+
+n() { echo "$#$@"; }
+f="  -  "
+out=$(n - ""$f"" -)
+[ "$out" = "5-  -  -" ] || warn 5
+
+
+n1() { echo $#; }
+n2() { n1 "$@"; }
+t1=$(n1)
+t2=$(n2)
+[ "$t1" = "0" ] || fail 6
+[ "$t2" = "0" ] || fail 7
+
+
+n1() { for i in "$@"; do echo $i; done; }
+n2() { for i in ${1+"$@"}; do echo $i; done; }
+t1=$(n1 "Hello World" "!")
+t2=$(n2 "Hello World" "!")
+WANT="Hello World
+!"
+[ "$t1" = "$WANT" ] || fail 8
+[ "$t2" = "$WANT" ] || fail 9
+
+
+n() { echo ${10}; }
+t1=$(n 1 2 3 4 5 6 7 8 9 xx yy)
+[ "$t1" = "xx" ] || fail 10
+
+
+chicken1=`echo " $spacey" | sed s/a/./g`
+chicken2="`quiet_stderr echo " $spacey" | sed s/a/./g`"
+chicken3=$(echo " $spacey" | sed s/a/./g)
+chicken4="$(echo " $spacey" | sed s/a/./g)"
+[ "$chicken1" = " this h.s * .nd sp.ces" ] || fail 11
+[ "$chicken2" = " this h.s * .nd sp.ces" ] || fail 12
+[ "$chicken3" = " this h.s * .nd sp.ces" ] || fail 13
+[ "$chicken4" = " this h.s * .nd sp.ces" ] || fail 14
+
+
+f1=
+f2=goo
+g1=
+g2=goo
+out=$(echo ${f1:-foo} ${f2:-foo} ${g1:=foo} ${g2:=foo})
+: ${f1:-roo} ${f2:-roo} ${g1:=roo} ${g2:=roo}
+[ "$out" = "foo goo foo goo" ] || fail 16
+[ "$f1$f2$g1$g2" = "gooroogoo" ] || fail 17
+
+
+# This is really a test that ${x:=} can span multiple lines without requiring
+# quoting, which is apparently required by POSIX but not supported in some
+# shells.  But to make ash/dash not abort the test script *entirely* when it
+# fails, we use the $() + eval nonsense.
+f3=$(quiet_stderr eval ': ${f3:=
+	a
+	b
+}' && echo "$f3")
+g3="
+	a
+	b"
+# This is kind of a major problem, but rejecting dash and busybox sh because
+# of this may cause more trouble than it's worth: people end up writing .do
+# scripts with bashisms unnecessarily :(
+[ "$f3" = "$g3" ] || warn 18
+
+
+# Note: assignment of $@ in this context is unspecified (what do you even expect
+# it to do?) so we don't test it.  But we should expect $* to work.
+set "a b" "c d" "*"
+t1=$*
+[ "$t1" = "a b c d *" ] || fail 19
+
+
+unset a
+t1=$(echo ${a-b  c})
+t2=$(echo ${a-'b  c'})
+t3=$(echo "${a-b  c}")
+t4=$(echo "${a-"b  c"}")
+t5=$(cat <<EOF
+${a-b  c}
+EOF
+)
+[ "$t1" = "b c" ] || fail 21
+[ "$t2" = "b  c" ] || fail 22
+[ "$t3" = "b  c" ] || fail 23
+[ "$t4" = "b  c" ] || fail 24  # freebsd 11.2 sh fails this
+[ "$t5" = "b  c" ] || fail 25
+
+
+unset a
+t1=$(echo ${a=b  c})
+t2=$(echo ${a='b  c'})
+t3=$(echo "${a=b  c}")
+t4=$(echo "${a="b  c"}")
+t5=$(cat <<EOF
+${a=b  c}
+EOF
+)
+[ "$t1" = "b c" ] || fail 31
+[ "$t2" = "b c" ] || warn 32
+[ "$t3" = "b  c" ] || fail 33
+[ "$t4" = "b  c" ] || fail 34
+[ "$t5" = "b  c" ] || fail 35
+
+
+unset foo
+foo=${foo='}'}    # unconfuse syntax highlighting: '
+[ "$foo" = "}" ] || fail 41
+foo=${foo='}'}    # unconfuse syntax highlighting: '
+[ "$foo" = "}" ] || fail 42
+
+
+default="yu,yaa"
+unset var
+: ${var="$default"}
+t1=$(cat <<EOF
+$var
+EOF
+)
+[ "$t1" = "yu,yaa" ] || fail 43
+
+
+default="a b c"
+unset list1 list2
+: ${list1="$default"} ${list2=$default}
+t1=$(for c in $list1; do echo $c; done)
+t2=$(for c in $list2; do echo $c; done)
+WANT="a
+b
+c"
+[ "$t1" = "$WANT" ] || fail 44
+[ "$t2" = "$WANT" ] || fail 45
+
+
+# Arguably, 'export' and 'local' shouldn't change variable assignment
+# quoting rules, but in many shells they do, and POSIX doesn't say anything
+# about it.  This leads to really confusing whitespace bugs in some shells,
+# where
+#     local x; x=$a
+# and
+#     local x=$a
+# mean two different things when $a contains whitespace.
+bob="a b *"
+bob=$(quiet_stderr eval 'export bob=$bob:hello'; echo "$bob")
+[ "$bob" = "a b *:hello" ] || skip 46
+bob="a b *"
+nob=$(eval 'f() { local nob=$bob:hello; echo "$nob"; }'; quiet_stderr f)
+[ "$nob" = "a b *:hello" ] || skip 47
+
+
+# 'local' should clear the variable being declared, and 'set -u' should
+# abort if you try to substitute an unset variable.
+x=5
+f() (
+	unset y1 y2 g
+	local x y1= y2
+	# dash, ksh, and FreeBSD sh fail this one, so we have to let it slide.
+	# That means in scripts, you should always initialize your locals with
+	# eg. "local x=" instead of just "local x"
+	[ -z "$x" ] || skip 47a
+	set -u
+	eval ': "$y1"' || fail 47b
+	# zsh (tested debian version 5.3.1) fails this, because it considers
+	# a variable to have been "set" when it's declared with 'local'.
+	# Other shells don't.  This is a relatively minor bug, since if you
+	# declare a local variable, it's probably not a typo.
+	zz=$(quiet_stderr eval 'printf s; echo x"$y2"')
+	[ "$zz" = "s" ] || warn 47c
+	# zsh does *not* fail the following, however.  It seems to work on
+	# all shells I tried, so we can make it fatal if it fails.
+	zz=$(quiet_stderr eval 'printf s; echo x"$g"')
+	[ "$zz" = "s" ] || fail 47d
+)
+f
+: "$not_set"
+
+# Someone pointed out that temporary variable assignments aren't
+# temporary anymore, if the thing you're calling is a function or builtin.
+f() { ls >/dev/null; }
+g=1 h=1 i=1
+g=2 f
+h=2 :
+i=2 ls >/dev/null
+[ "$g" = "2" ] || warn 48   # freebsd dash 0.5.10.2 fails this
+[ "$h" = "2" ] || fail 49
+[ "$i" = "1" ] || fail 50
+
+
+var='a a b b'
+var2='*a'
+t1=${#var}
+t2=${var#a* }
+t3=${var##a* }
+t4=${var%b*}
+t5=${var%%b*}
+t6="${var2#'*'}"
+t7="${var2#"*"}"
+[ "$t1" = "7" ] || fail 51
+[ "$t2" = "a b b" ] || fail 52
+[ "$t3" = "b" ] || fail 53
+[ "$t4" = "a a b " ] || fail 54
+[ "$t5" = "a a " ] || fail 55
+
+# shells I tested work with #"*" but dash doesn't work with #'*' .  The
+# workaround is to simply use double quotes, so I'll make that one a warning.
+[ "$t6" = "a" ] || warn 56
+[ "$t7" = "a" ] || fail 56
+
+
+in="a
+b
+"
+t1=$(echo "$in" | tr a A)
+t2="$(echo "$in" | tr a A)"
+[ "$t1" = "A
+b" ] || exit 57
+[ "$t2" = "A
+b" ] || exit 58
+
+
+echo "`printf 'foo\r\n'` bar" >broken
+echo "`printf 'foo\r\n'`"" bar" | diff -q - broken || fail 59
+
+
+#
+# This one is too obnoxious.  dash and ash pass the test, but most shells
+# don't, and this case is just too dumb to care about.  Just don't do that!
+#
+# Where "that" is a right-paren-only clause in a case statement inside $().
+#
+t=
+tt=$(quiet_stderr eval 't=`echo $(case x in x) echo hello;; esac)`'; echo "$t")
+[ "$tt" = "hello" ] || skip 60
+#
+# Note that with the little-known optional left-paren, this *does* work.
+# Let's try it to make sure that remains true.
+t=`echo $(case x in (x) echo hello;; esac)`
+[ "$t" = "hello" ] || fail 60
+
+
+x=5
+t1=$(($x + 4))
+t2=$(echo $(( 010 + 0x10 )))
+[ "$t1" = "9" ] || fail 61
+[ "$t2" = "24" ] || fail 62
+
+
+t=$(echo hello ^ cat)
+[ "$t" = "hello ^ cat" ] || fail 65
+
+
+t1=$(for d in this-glob-does-*-not-exist; do echo "$d"; done)
+t2=$(for d in this-glob-does-*-not-exist; do echo "$d"; done)
+
+
+# http://www.gnu.org/software/hello/manual/autoconf/Assignments.html
+false || foo=bar; [ "$?" = 0 ] || fail 71
+foo=`exit 1`; [ "$?" != 0 ] || fail 72
+
+
+# http://www.gnu.org/software/hello/manual/autoconf/Shell-Functions.html
+f1() { echo 1; }
+f2(){ echo 2;}
+f3()(echo 3)
+f4() { :; }  # Note: redefined on next line
+quiet_stderr eval 'f4()if true; then echo 4; fi'
+f5() ( exit 5 )
+[ "$(f1)" = 1 ] || fail 81
+[ "$(f2)" = 2 ] || fail 82
+[ "$(f3)" = 3 ] || fail 83
+# only posh fails this one, and it's not something real people write,
+# so let's just make it a warning.
+[ "$(f4)" = 4 ] || warn 84
+f5 && fail 85
+f6() (
+	f6b() { return 1; }
+	set -e
+	f6b
+	fail 86
+)
+f6
+f7() { :; }; f7=; f7 || fail 87
+a=
+f8() { echo $a; };
+t8=$(a=1 f8)
+[ "$t8" = "1" ] || fail 88
+
+
+# Some versions of zsh (eg.  5.0.8 on MacOS, but not 5.3.1
+# on Debian) fail this one.  It seems to be very specific:
+# "set -e" aborts the subshell, if a
+# function-within-a-function returns an error code, even
+# though there's an "|| true" there, but only if in the
+# else clause, and only if the outer () does *not* have an
+# "|| something" clause.
+#
+# "x || true" should not abort when set -e, even if x is
+# a function.
+(
+	set -e
+	f() { false; }
+	g() { true | f; }
+	if false; then
+		:
+	else
+		! g || true
+	fi
+)
+rv=$?
+[ "$rv" = 0 ] || fail 89
+
+
+rm -f shellfail
+echo "false; true" >shellfail
+
+# 'false' should *not* abort because outer context has "||".
+# Then 'true' gives success.
+set +e
+(
+	set -e
+	false
+	true
+) || fail 89a
+
+# 'false' still should not abort even in a subshell.
+set +e
+(
+	set -e
+	( false; true )
+	[ "$?" = 0 ] || fail 89b1
+	true
+) || fail 89b
+
+# Check whether "." scripts inherit "set -e" setting *and* the outer "||"
+# context.  This doesn't seem to be explicitly specified by POSIX.
+# References:
+#  http://www.austingroupbugs.net/view.php?id=52
+#  https://www.in-ulm.de/~mascheck/various/set-e/
+set +e
+(
+	set -e
+	( . ./shellfail )
+	# There seems to be widespread disagreement on what should happen
+	# here.  All shells seem to inherit "set -e" into a "." script, but
+	# they disagree about whether the outer "||" context (which
+	# effectively disables "set -e") should be inherited.  ksh93, bash,
+	# and zsh inherit it, while ash, dash, and mksh (among others) throw
+	# it away, causing "set -e" to abort.
+	#
+	# Honestly, the latter behaviour seems a lot more like what I'd
+	# expect (a separate script doesn't want its "set -e" behaviour
+	# to depend on whether it's deep in a context with an "||" somewhere
+	# outside it), so let's warn on the former.  But I'm willing to hear
+	# arguments either way.  -- apenwarr
+	[ "$?" = 0 ] && warn 89c
+	# even if "." aborted and returned nonzero, our own context should
+	# not have aborted, so we expect to get here and avoid the outer
+	# fail below.
+	true
+) || fail 89c1
+
+
+# http://www.gnu.org/software/hello/manual/autoconf/Limitations-of-Builtins.html
+. /dev/null || fail 90
+(! : | :) && fail 91 || true
+(! { :; }) && fail 92 || true
+t3=none
+case frog.c in
+	(*.c) t3=c ;;
+	(*) t3=all ;;
+esac
+[ "$t3" = "c" ] || fail 93
+t4=$(echo '\n' | wc -l)  # echo should *not* be parsing backslash-escapes
+[ "$t4" -eq 1 ] || warn 94
+f5() {
+	for arg; do
+		echo $arg
+	done
+}
+t5=$(f5 a=5 b c)
+[ "$t5" = "a=5
+b
+c" ] || fail 95
+t6=$(printf -- '%d  %d' 5 6)
+[ "$t6" = "5  6" ] || fail 96
+echo 'word\ game stuff' >shellfile
+read t7a t7b <shellfile
+read -r t8a t8b <shellfile
+[ "$t7a" = 'word game' ] || fail 97
+[ "$t7b" = 'stuff' ] || fail 97
+[ "$t8a" = 'word\' ] || fail 98
+[ "$t8b" = 'game stuff' ] || fail 98
+test -e shellfile || fail 99
+[ "-a" = "-a" ] || fail 100
+[ "-a" != "-b" ] || fail 101
+f() { [ "-a" -a "!" ] || fail 102; }
+quiet_stderr f
+(unset foo && unset foo && unset foo) || fail 103
+
+# http://www.gnu.org/software/hello/manual/autoconf/Limitations-of-Usual-Tools.html
+rm -f || fail 110
+
+# reported by singpolyma in busybox-w32's issue tracker
+(
+	set -e
+	HOME="$PWD/space home dir"
+	rm -rf "$HOME"
+	mkdir "$HOME"
+	quiet_stderr cd ~ || exit 1
+	cd ..
+	rmdir 'space home dir'
+) || warn 111
+
+# reported by Alex Bradbury:
+#  http://www.debian.org/doc/debian-policy/ch-files.html#s-scripts
+# Debian says that 'local' isn't POSIX, but I like it, so let's reject
+# any shell where it doesn't exist.
+x=5 y=6 z=7
+lt() { x=1; local y=2 z=3; }
+lt
+[ "$x" = "1" ] || fail 112
+[ "$y$z" = "67" ] || fail 113
+
+# reported by Tim Allen:
+# some shells don't return 0 from an empty '.' script; they return the
+# previous command's exit code instead.
+# See:
+#  http://pubs.opengroup.org/onlinepubs/009695399/utilities/dot.html
+#  http://austingroupbugs.net/view.php?id=114
+false
+. ./nothing.od || warn 114
+
+# this is actually a bash/kshism, but is allowed by POSIX: the parameters to
+# '.' should be passed to the sub-script.
+#
+# We used to require this, because it's so useful despite being optional in
+# POSIX.  But unfortunately, too many shells (including dash) can't do it,
+# so we ended up always using bash, which leads people to write .do scripts
+# with bashisms.
+set x y z
+# dotparams.od might warn 115, but should never return nonzero
+. ./dotparams.od a b || fail 117
+[ "$1-$2-$3" = "x-y-z" ] || fail 116
+
+# Warn about the way bash allows '==' in its test command.
+# This is the #1 bashism I've observed, and totally unnecessary, so let's
+# dock it some points so it doesn't always end up as the primary shell.
+[ 1 == 1 ] 2>/dev/null && warn 118
+
+# Some shells or OSes apparently don't support left padding in printf
+x=$(printf "a%-5sc" "b")
+[ "$x" = "ab    c" ] || warn 119
+
+# Make sure cd supports -L and -P options properly
+rm -f shlink ../shlink
+ln -s . shlink
+(quiet_stderr cd -L shlink/shlink/shlink/../shlink) || fail 120
+(quiet_stderr cd -P shlink/shlink/shlink/../shlink) && fail 121
+x1=$(cd shlink && basename "$(pwd -P)")
+x2=$(cd shlink && basename "$(pwd -L)")
+[ "$x1" = "t" ] || fail 122
+[ "$x2" = "shlink" ] || fail 123
+
+# Reported by Wayne Scott on FreeBSD 7.0 (ancient). Apparently the sh (or
+# bash?) there prints "$3: ambiguous redirect" if you redirect to it without
+# putting the $3 in quotes (ie >"$3").  I hadn't seen that before, even
+# though it's not obvious to most sh users that the > argument is implicitly
+# quoted.
+set a b "shelltest.tmp log.tmp"
+rm -f "$3" $3
+echo hello >$3 || fail 130
+[ -e "$3" ] || fail 131
+[ ! -e "shelltest.tmp" ] || fail 132
+rm -f "$3" $3
+
+[ -e shelltest.failed ] && exit 41
+[ -e shelltest.warned ] && exit 42
+exit 40

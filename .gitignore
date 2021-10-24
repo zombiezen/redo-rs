@@ -8,6 +8,11 @@
 # Redo directory
 .redo/
 
+# Integration tests
+/redo/py
+/redo/sh
+/redo/whichpython
+
 # Minimal do script files
 .do_built
 .do_built.dir/

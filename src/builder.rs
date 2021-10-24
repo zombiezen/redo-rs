@@ -653,11 +653,18 @@ where
 {
     use futures::future::FutureExt;
     use futures::stream::StreamExt;
+    use rand::seq::SliceRandom;
     use std::convert::TryFrom;
+    use std::iter::FromIterator;
+
+    let mut target_order = Vec::from_iter(0..targets.len());
+    if ps.env().shuffle {
+        target_order.shuffle(&mut rand::thread_rng());
+    }
 
     let should_build_func = Rc::new(should_build_func);
-    for t in targets {
-        let t = t.as_ref();
+    for i in target_order.iter().copied() {
+        let t = targets[i].as_ref();
         if t.find('\n').is_some() {
             log_err!("{:?}: filenames containing newlines are not allowed.\n", t);
             return Err(BuildErrorKind::InvalidTarget(t.into()).into());
@@ -708,8 +715,8 @@ where
     pin_mut!(job_futures);
     {
         let mut seen: HashSet<String> = HashSet::new();
-        for t in targets {
-            let t = t.as_ref();
+        for i in target_order.iter().copied() {
+            let t = targets[i].as_ref();
             if t.is_empty() {
                 log_err!("cannot build the empty target (\"\").\n");
                 result.set(Err(BuildErrorKind::InvalidTarget(t.into()).into()));

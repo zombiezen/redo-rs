@@ -49,6 +49,12 @@ fn run() -> Result<(), Error> {
         .arg(Arg::from_usage(
             "-x, --xtrace... 'print commands as they are executed (variables expanded)'",
         ))
+        .arg(Arg::from_usage(
+            "-k, --keep-going 'keep going as long as possible even if some targets fail'",
+        ))
+        .arg(Arg::from_usage(
+            "--shuffle 'randomize the build order to find dependency bugs'",
+        ))
         .arg(
             Arg::from_usage("--no-log")
                 .help("don't capture error output, just let it flow straight to stderr"),
@@ -78,6 +84,12 @@ fn run() -> Result<(), Error> {
         if n > 0 {
             std::env::set_var("REDO_XTRACE", n.to_string());
         }
+    }
+    if redo::auto_bool_arg(&matches, "keep-going").unwrap_or(false) {
+        std::env::set_var("REDO_KEEP_GOING", "1");
+    }
+    if redo::auto_bool_arg(&matches, "shuffle").unwrap_or(false) {
+        std::env::set_var("REDO_SHUFFLE", "1");
     }
     if redo::auto_bool_arg(&matches, "debug-locks").unwrap_or(false) {
         std::env::set_var("REDO_DEBUG_LOCKS", "1");

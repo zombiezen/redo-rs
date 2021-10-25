@@ -45,11 +45,11 @@ fn run() -> Result<(), Error> {
     let want = redo::abs_path(&env::current_dir()?, Path::new(&want));
     for df in redo::possible_do_files(want) {
         let do_path = df.do_dir().join(df.do_file());
-        let relpath = redo::relpath(do_path, ".")?;
+        let relpath = redo::relpath(&do_path, ".")?;
         let relpath_str = relpath.as_os_str().to_str().unwrap();
         assert!(!relpath_str.contains('\n'));
         println!("{}", relpath_str);
-        if relpath.exists() {
+        if do_path.exists() {
             return Ok(());
         }
     }

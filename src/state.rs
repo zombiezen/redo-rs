@@ -31,6 +31,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp;
 use std::collections::HashSet;
+use std::env;
 use std::ffi::OsStr;
 use std::fmt::{self, Display, Formatter};
 use std::fs::{self, Metadata, OpenOptions};
@@ -1249,9 +1250,9 @@ fn realdirpath<'a, P>(t: &'a P) -> io::Result<Cow<'a, Path>>
 where
     P: AsRef<Path> + ?Sized,
 {
-    let t = t.as_ref();
+    let t = helpers::abs_path(&env::current_dir()?, t.as_ref());
     match t.parent() {
-        None => Ok(Cow::Borrowed(t)),
+        None => Ok(t),
         Some(dname) => {
             let fname = t.file_name().unwrap_or(OsStr::new(".."));
             let mut buf = dname.canonicalize().or_else(|e| match e.kind() {
@@ -1287,6 +1288,13 @@ mod tests {
         realdirpath_intermediate_parent: ("/foo/../bar", "/bar"),
     );
 
+    #[test]
+    fn realdirpath_curdir() {
+        let curdir = env::current_dir().unwrap();
+        let t = ".";
+        assert_eq!(curdir, realdirpath(&t).unwrap().as_os_str());
+    }
+
     macro_rules! relpath_tests {
         ($($name:ident: $value:expr,)*) => {
             $(
@@ -1310,4 +1318,18 @@ mod tests {
         relpath_different_root: ("/a/b/c", "/d", "../a/b/c"),
         relpath_tricky_parents: ("/home/light/src/github.com/zombiezen/redo-rs/.redo/../test.redo.tmp", "/home/light/src/github.com/zombiezen/redo-rs/.redo/..", "test.redo.tmp"),
     );
+
+    #[test]
+    fn relpath_curdir() {
+        let curdir = env::current_dir().unwrap();
+        let t = curdir.parent().unwrap().join("foo");
+        let base = ".";
+        assert_eq!(
+            "../foo",
+            relpath(&t, &base).unwrap().as_os_str(),
+            "t={:?}, base={:?}",
+            &t,
+            &base,
+        );
+    }
 }

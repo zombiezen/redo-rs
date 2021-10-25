@@ -437,7 +437,7 @@ impl BuildJob<'_> {
         //  build recursive, where currently it's flat.
         let here = env::current_dir()?;
         let fix = |p: &str| -> io::Result<CString> {
-            state::relpath(ptx.state().env().base.join(p), &here)
+            state::relpath(ptx.state().env().base().join(p), &here)
                 .map(|p| CString::new(Vec::from_iter(OsBytes::new(&p))).unwrap())
         };
         let mut argv: Vec<Cow<CStr>> = vec![

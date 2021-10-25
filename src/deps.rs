@@ -135,7 +135,7 @@ fn private_is_dirty(
         let mut dirty = Dirtiness::Clean;
         match mode {
             DepMode::Created => {
-                if ptx.state().env().base.join(&f2.name).exists() {
+                if ptx.state().env().base().join(&f2.name).exists() {
                     log_debug!("{}-- DIRTY (created)\n", depth);
                     dirty = Dirtiness::Dirty;
                 }

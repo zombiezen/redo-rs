@@ -121,8 +121,9 @@ mod state;
 
 pub use deps::{is_dirty, Dirtiness};
 pub use env::{Env, OptionalBool};
-pub use helpers::normpath;
+pub use helpers::{abs_path, normpath};
 pub use jobserver::JobServer;
+pub use paths::{possible_do_files, DoFile, PossibleDoFiles};
 pub use state::{
     logname, relpath, DepMode, File, FileError, FileErrorKind, Lock, LockType, ProcessState,
     ProcessTransaction, Stamp, ALWAYS, LOG_LOCK_MAGIC,
@@ -155,7 +156,7 @@ pub fn run_program<S: AsRef<str>, F: FnOnce() -> Result<(), failure::Error>>(nam
                 write!(s, "{}", e).unwrap();
                 s
             });
-            eprintln!("{}: {}", name, msg);
+            log_err!("{}: {}", name, msg);
             let retcode = e
                 .downcast_ref::<builder::BuildError>()
                 .map(|be| i32::from(be.kind()))

@@ -73,7 +73,7 @@ pub struct ProcessTransaction<'a> {
 impl ProcessState {
     pub fn init(mut e: Env) -> Result<ProcessState, Error> {
         let dbdir = {
-            let mut dbdir = PathBuf::from(&e.base);
+            let mut dbdir = PathBuf::from(e.base());
             dbdir.push(".redo");
             dbdir
         };
@@ -374,7 +374,7 @@ impl File {
             Cow::Borrowed(&ALWAYS)
         } else {
             Cow::Owned(
-                relpath(name, &ptx.state().env.base)
+                relpath(name, &ptx.state().env().base())
                     .context(FileErrorKind::Generic)?
                     .to_string_lossy()
                     .into_owned(),
@@ -709,7 +709,7 @@ impl File {
         v: &Env,
         statfunc: F,
     ) -> Result<(bool, Stamp), Error> {
-        match statfunc(&v.base.join(&self.name)) {
+        match statfunc(&v.base().join(&self.name)) {
             Ok(metadata) => Ok((
                 metadata.file_type().is_symlink(),
                 Stamp::from_metadata(&metadata)?,
@@ -741,7 +741,7 @@ impl File {
     }
 
     pub fn nice_name(&self, v: &Env) -> Result<String, Error> {
-        Ok(relpath(v.base.join(&self.name), &v.startdir)?
+        Ok(relpath(v.base().join(&self.name), &v.startdir)?
             .to_string_lossy()
             .into_owned())
     }
@@ -821,7 +821,7 @@ impl From<Context<FileErrorKind>> for FileError {
 
 /// Given the ID of a `File`, return the filename of its build log.
 pub fn logname(v: &Env, fid: i64) -> PathBuf {
-    let mut p = PathBuf::from(&v.base);
+    let mut p = PathBuf::from(v.base());
     p.push(".redo");
     p.push(format!("log.{}", fid));
     p

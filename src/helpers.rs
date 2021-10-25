@@ -50,7 +50,8 @@ pub(crate) fn unlink<P: ?Sized + NixPath>(f: &P) -> nix::Result<()> {
     }
 }
 
-pub(crate) fn abs_path<'p, 'q, P, Q>(cwd: &'p P, path: &'q Q) -> Cow<'q, Path>
+/// Make a path absolute if it isn't already.
+pub fn abs_path<'p, 'q, P, Q>(cwd: &'p P, path: &'q Q) -> Cow<'q, Path>
 where
     P: AsRef<Path> + ?Sized,
     Q: AsRef<Path> + ?Sized,

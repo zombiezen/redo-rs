@@ -31,7 +31,7 @@ use super::helpers;
 #[non_exhaustive]
 pub struct Env {
     is_toplevel: bool,
-    pub(crate) base: PathBuf,
+    base: PathBuf,
     pub(crate) pwd: PathBuf,
     pub(crate) target: PathBuf,
     depth: String,
@@ -204,6 +204,13 @@ impl Env {
     #[inline]
     pub fn is_toplevel(&self) -> bool {
         self.is_toplevel
+    }
+
+    /// Absolute path of the directory that contains (or should contain)
+    /// the .redo directory.
+    #[inline]
+    pub fn base(&self) -> &Path {
+        &self.base
     }
 
     #[inline]

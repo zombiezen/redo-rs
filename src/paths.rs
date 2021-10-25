@@ -76,8 +76,9 @@ impl<'a> Iterator for DefaultDoFiles<'a> {
 
 impl<'a> FusedIterator for DefaultDoFiles<'a> {}
 
+/// Information about a single .do file.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DoFile {
+pub struct DoFile {
     /// Absolute path to the directory that the .do file is located in.
     pub(crate) do_dir: PathBuf,
     /// Name of the .do file.
@@ -92,61 +93,73 @@ pub(crate) struct DoFile {
     pub(crate) ext: OsString,
 }
 
-/// Iterator over the list of .do files needed to build a given path.
+impl DoFile {
+    /// Returns the absolute path to the directory that the .do file is located in.
+    pub fn do_dir(&self) -> &Path {
+        &self.do_dir
+    }
+
+    /// Returns the name of the .do file.
+    pub fn do_file(&self) -> &OsStr {
+        &self.do_file
+    }
+}
+
+/// Iterator over the list of .do files needed to build a given path,
+/// returned by [`possible_do_files`].
 #[derive(Debug)]
-pub(crate) struct DoFiles<B, P>
-where
-    B: AsRef<Path>,
-    P: AsRef<Path>,
-{
-    state: DoFilesState<P>,
-    base: B,
+pub struct PossibleDoFiles {
+    state: DoFilesState,
 }
 
 #[derive(Debug)]
-enum DoFilesState<P: AsRef<Path>> {
-    First(P),
+enum DoFilesState {
+    First(PathBuf),
     Recursive(RecursiveDoFilesState),
     Stopped,
 }
 
-impl<B: AsRef<Path>, P: AsRef<Path>> DoFiles<B, P> {
-    pub(crate) fn new(base: B, p: P) -> DoFiles<B, P> {
-        assert!(base.as_ref().is_absolute());
-        assert!(!p.as_ref().is_absolute());
-        DoFiles {
-            state: DoFilesState::First(p),
-            base,
-        }
+/// Create an iterator over the .do files for the absolute path `p`.
+///
+/// # Panics
+///
+/// If `p` is not absolute.
+pub fn possible_do_files<P: AsRef<Path>>(p: P) -> PossibleDoFiles {
+    assert!(p.as_ref().is_absolute());
+    PossibleDoFiles {
+        state: DoFilesState::First(helpers::normpath(p.as_ref()).to_path_buf()),
     }
 }
 
-impl<B: AsRef<Path>, P: AsRef<Path>> Iterator for DoFiles<B, P> {
-    type Item = Result<DoFile, Error>;
+impl Iterator for PossibleDoFiles {
+    type Item = DoFile;
 
-    fn next(&mut self) -> Option<Result<DoFile, Error>> {
-        match self.state {
-            DoFilesState::First(ref t) => {
-                let t = t.as_ref();
+    fn next(&mut self) -> Option<DoFile> {
+        let mut state = DoFilesState::Stopped;
+        mem::swap(&mut state, &mut self.state);
+        match state {
+            DoFilesState::First(t) => {
                 let result = {
                     let dirname = t.parent().unwrap_or(&t);
                     let filename = t.file_name().unwrap();
                     let mut do_file = filename.to_os_string();
                     do_file.push(".do");
-                    Some(Ok(DoFile {
-                        do_dir: self.base.as_ref().join(dirname),
+                    Some(DoFile {
+                        do_dir: PathBuf::from(dirname),
                         do_file,
                         base_dir: PathBuf::new(),
                         base_name: filename.into(),
                         ext: OsString::new(),
-                    }))
+                    })
                 };
-                let norm_t = helpers::normpath(&self.base.as_ref().join(t)).into_owned();
-                self.state = DoFilesState::Recursive(RecursiveDoFilesState::new(norm_t));
+                self.state = DoFilesState::Recursive(RecursiveDoFilesState::new(t));
                 result
             }
-            DoFilesState::Recursive(ref mut state) => match state.next() {
-                result @ Some(_) => result,
+            DoFilesState::Recursive(mut state) => match state.next() {
+                result @ Some(_) => {
+                    self.state = DoFilesState::Recursive(state);
+                    result
+                }
                 None => {
                     self.state = DoFilesState::Stopped;
                     None
@@ -155,9 +168,17 @@ impl<B: AsRef<Path>, P: AsRef<Path>> Iterator for DoFiles<B, P> {
             DoFilesState::Stopped => None,
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.state {
+            DoFilesState::First(_) => (1, None),
+            DoFilesState::Recursive(state) => state.size_hint(),
+            DoFilesState::Stopped => (0, Some(0)),
+        }
+    }
 }
 
-impl<B: AsRef<Path>, P: AsRef<Path>> FusedIterator for DoFiles<B, P> {}
+impl FusedIterator for PossibleDoFiles {}
 
 #[derive(Debug)]
 struct RecursiveDoFilesState {
@@ -202,9 +223,9 @@ impl RecursiveDoFilesState {
 }
 
 impl Iterator for RecursiveDoFilesState {
-    type Item = Result<DoFile, Error>;
+    type Item = DoFile;
 
-    fn next(&mut self) -> Option<Result<DoFile, Error>> {
+    fn next(&mut self) -> Option<DoFile> {
         // It's important to try every possibility in a directory before resorting
         // to a parent directory.  Think about nested projects: We don't want
         // ../../default.o.do to take precedence over ../default.do, because
@@ -223,13 +244,13 @@ impl Iterator for RecursiveDoFilesState {
             };
             let next_name = self.default_do_files.next();
             if let Some((do_file, base_name, ext)) = next_name {
-                return Some(Ok(DoFile {
+                return Some(DoFile {
                     do_dir: base_dir.to_path_buf(),
                     do_file: do_file.into(),
                     base_dir: sub_dir.to_path_buf(),
                     base_name: sub_dir.join(base_name),
                     ext: ext.into(),
-                }));
+                });
             }
             self.dir_bits.pop();
             self.default_do_files =
@@ -242,8 +263,7 @@ pub(crate) fn find_do_file(
     ptx: &mut ProcessTransaction,
     f: &mut state::File,
 ) -> Result<Option<DoFile>, Error> {
-    for result in DoFiles::new(ptx.state().env().base.clone(), PathBuf::from(&f.name)) {
-        let do_file = result?;
+    for do_file in possible_do_files(helpers::abs_path(ptx.state().env().base(), &f.name)) {
         let do_path = do_file.do_dir.join(&do_file.do_file);
         log_debug2!(
             "{}: {}:{} ?\n",
@@ -316,17 +336,13 @@ mod tests {
     }
 
     #[test]
-    fn do_files_test() {
+    fn possible_do_files_test() {
         use std::iter::FromIterator;
 
         assert_eq!(
-            Vec::from_iter(
-                DoFiles::new(
-                    PathBuf::from("/src/redo-rs"),
-                    PathBuf::from("bin/redo-log.o")
-                )
-                .map(Result::unwrap)
-            ),
+            Vec::from_iter(possible_do_files(PathBuf::from(
+                "/src/redo-rs/bin/redo-log.o"
+            ))),
             vec![
                 DoFile {
                     do_dir: "/src/redo-rs/bin".into(),

@@ -20,6 +20,8 @@ use failure::{format_err, Backtrace, Context, Error, Fail, ResultExt};
 use futures::future::FusedFuture;
 use futures::stream::{FusedStream, FuturesUnordered, Stream};
 use futures::{pin_mut, select};
+use nix;
+use nix::errno::Errno;
 use nix::sys::signal::{self, SigHandler, Signal};
 use nix::sys::stat;
 use nix::sys::wait;
@@ -576,7 +578,13 @@ impl BuildJob<'_> {
                 }
             } else {
                 // no output generated at all; that's ok
-                helpers::unlink(t).expect("failed to remove target file");
+
+                // TODO(maybe): Remove EISDIR exception or remove directory?
+                // Needed for makedir2 test. :(
+                match helpers::unlink(t) {
+                    Ok(_) | Err(nix::Error::Sys(Errno::EISDIR)) => {}
+                    e @ Err(_) => e.expect("failed to remove target file"),
+                }
             }
             if let Err(e) = sf.refresh(ptx) {
                 log_err!("{:?}: refresh: {}", t, e);

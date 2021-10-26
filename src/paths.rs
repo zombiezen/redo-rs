@@ -15,11 +15,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use failure::{format_err, Error};
+use ouroboros::self_referencing;
 use std::ffi::{OsStr, OsString};
 use std::iter::FusedIterator;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::str::MatchIndices;
 
 use super::helpers;
@@ -152,7 +152,7 @@ impl Iterator for PossibleDoFiles {
                         ext: OsString::new(),
                     })
                 };
-                self.state = DoFilesState::Recursive(RecursiveDoFilesState::new(t));
+                self.state = DoFilesState::Recursive(RecursiveDoFilesState::from_path_buf(t));
                 result
             }
             DoFilesState::Recursive(mut state) => match state.next() {
@@ -180,45 +180,43 @@ impl Iterator for PossibleDoFiles {
 
 impl FusedIterator for PossibleDoFiles {}
 
+#[self_referencing]
 #[derive(Debug)]
 struct RecursiveDoFilesState {
-    norm_path: Pin<Box<PathBuf>>,
-    dir_bits: Vec<(*const Path, *const Path)>, // stored in reverse order as stack
-    default_do_files: DefaultDoFiles<'static>, // refers to memory in norm_path
+    norm_path: PathBuf,
+    #[borrows(norm_path)]
+    #[covariant]
+    dir_bits: Vec<(&'this Path, &'this Path)>, // stored in reverse order as stack
+    #[borrows(norm_path)]
+    #[not_covariant]
+    default_do_files: DefaultDoFiles<'this>,
 }
 
 impl RecursiveDoFilesState {
-    fn new(norm_path: PathBuf) -> RecursiveDoFilesState {
+    fn from_path_buf(norm_path: PathBuf) -> RecursiveDoFilesState {
         use std::iter::FromIterator;
-        let norm_path = Pin::new(Box::new(norm_path));
-        let dir_bits: Vec<(*const Path, *const Path)> = norm_path
-            .parent()
-            .map(|dirname| {
-                let mut bits = path_splits(dirname);
-                bits.reverse();
-                Vec::from_iter(
-                    bits.into_iter()
-                        .map(|(dir, base)| (dir as *const Path, base as *const Path)),
-                )
-            })
-            .unwrap_or_default();
-        let default_do_files =
-            unsafe { RecursiveDoFilesState::default_do_files_for(&norm_path.as_ref()) };
-        RecursiveDoFilesState {
+        RecursiveDoFilesStateBuilder {
             norm_path,
-            dir_bits,
-            default_do_files,
+            dir_bits_builder: |norm_path| {
+                norm_path
+                    .parent()
+                    .map(|dirname| {
+                        let mut bits = path_splits(dirname);
+                        bits.reverse();
+                        Vec::from_iter(bits.into_iter())
+                    })
+                    .unwrap_or_default()
+            },
+            default_do_files_builder: |norm_path| {
+                DefaultDoFiles::from(
+                    norm_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap(),
+                )
+            },
         }
-    }
-
-    unsafe fn default_do_files_for(norm_path: &Pin<&PathBuf>) -> DefaultDoFiles<'static> {
-        // TODO(someday): Trigger error instead of panic if file_name() is non-UTF-8.
-        mem::transmute(DefaultDoFiles::from(
-            norm_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap(),
-        ))
+        .build()
     }
 }
 
@@ -232,17 +230,12 @@ impl Iterator for RecursiveDoFilesState {
         // the former one might just be an artifact of someone embedding my project
         // into theirs as a subdir.  When they do, my rules should still be used
         // for building my project in *all* cases.
-        loop {
-            let (base_dir, sub_dir) = match self
-                .dir_bits
-                .last()
-                .copied()
-                .map(|(base, sub)| unsafe { (&*base, &*sub) })
-            {
+        self.with_mut(|fields| loop {
+            let (base_dir, sub_dir) = match fields.dir_bits.last().copied() {
                 Some(bit) => bit,
                 None => return None,
             };
-            let next_name = self.default_do_files.next();
+            let next_name = fields.default_do_files.next();
             if let Some((do_file, base_name, ext)) = next_name {
                 return Some(DoFile {
                     do_dir: base_dir.to_path_buf(),
@@ -252,10 +245,15 @@ impl Iterator for RecursiveDoFilesState {
                     ext: ext.into(),
                 });
             }
-            self.dir_bits.pop();
-            self.default_do_files =
-                unsafe { RecursiveDoFilesState::default_do_files_for(&self.norm_path.as_ref()) };
-        }
+            fields.dir_bits.pop();
+            *fields.default_do_files = DefaultDoFiles::from(
+                fields
+                    .norm_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap(),
+            );
+        })
     }
 }
 

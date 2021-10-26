@@ -22,10 +22,11 @@ use nix::errno::Errno;
 use nix::fcntl::{self, FcntlArg};
 use nix::sys::wait::{self, WaitStatus};
 use nix::unistd::{self, ForkResult};
+use ouroboros::self_referencing;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{
-    self, params, Connection, DropBehavior, OptionalExtension, Row, ToSql, TransactionBehavior,
-    NO_PARAMS,
+    self, params, Connection, DropBehavior, OptionalExtension, Row, Rows, Statement, ToSql,
+    TransactionBehavior, NO_PARAMS,
 };
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -36,6 +37,7 @@ use std::ffi::OsStr;
 use std::fmt::{self, Display, Formatter};
 use std::fs::{self, Metadata, OpenOptions};
 use std::io;
+use std::iter::FusedIterator;
 use std::mem;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -439,6 +441,10 @@ impl File {
     }
 
     pub(crate) fn from_cols(env: &Env, row: &Row) -> rusqlite::Result<File> {
+        File::from_cols_with_runid(row, env.runid)
+    }
+
+    pub(crate) fn from_cols_with_runid(row: &Row, runid: Option<i64>) -> rusqlite::Result<File> {
         let mut f = File {
             id: row.get("rowid")?,
             name: row.get("name")?,
@@ -455,7 +461,7 @@ impl File {
             csum: row.get("csum")?,
         };
         if f.name == ALWAYS {
-            if let Some(env_runid) = env.runid {
+            if let Some(env_runid) = runid {
                 f.changed_runid = Some(
                     f.changed_runid
                         .map(|changed_runid| cmp::max(env_runid, changed_runid))
@@ -469,6 +475,11 @@ impl File {
     #[inline]
     pub fn id(&self) -> i64 {
         self.id
+    }
+
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     #[inline]
@@ -581,7 +592,7 @@ impl File {
     }
 
     /// Reports if this object represents a source (not a target).
-    pub(crate) fn is_source(&self, v: &Env) -> Result<bool, Error> {
+    pub fn is_source(&self, v: &Env) -> Result<bool, Error> {
         if self.name.starts_with("//") {
             // Special name, ignore.
             return Ok(false);
@@ -604,7 +615,7 @@ impl File {
     }
 
     /// Reports if this object represents a target (not a source).
-    pub(crate) fn is_target(&self, v: &Env) -> Result<bool, Error> {
+    pub fn is_target(&self, v: &Env) -> Result<bool, Error> {
         if !self.is_generated {
             return Ok(false);
         }
@@ -627,9 +638,9 @@ impl File {
 
     /// Reports whether the file already failed during this run.
     pub fn is_failed(&self, v: &Env) -> bool {
-        match self.failed_runid {
-            Some(failed_runid) => failed_runid != 0 && failed_runid >= v.runid.unwrap(),
-            None => false,
+        match (self.failed_runid, v.runid) {
+            (Some(failed_runid), Some(vrunid)) => failed_runid != 0 && failed_runid >= vrunid,
+            _ => false,
         }
     }
 
@@ -746,6 +757,95 @@ impl File {
             .to_string_lossy()
             .into_owned())
     }
+}
+
+/// Iterator over files.
+pub struct Files<'tx> {
+    state: FilesState<'tx>,
+    runid: Option<i64>,
+}
+
+impl Files<'_> {
+    /// List all of the files known to redo, ordered by name.
+    pub fn list<'tx>(ptx: &'tx mut ProcessTransaction) -> Files<'tx> {
+        let runid = ptx.state().env().runid;
+        let stmt = match ptx
+            .state()
+            .db
+            .prepare(&format!("select {} from Files order by name", FILE_COLS))
+        {
+            Ok(stmt) => stmt,
+            Err(e) => {
+                return Files {
+                    state: FilesState::Error(e.into()),
+                    runid,
+                }
+            }
+        };
+        let state_result = FilesRowsTryBuilder {
+            stmt,
+            rows_builder: |stmt| stmt.query(rusqlite::NO_PARAMS),
+        }
+        .try_build();
+        match state_result {
+            Ok(rows) => Files {
+                state: FilesState::Rows(rows),
+                runid,
+            },
+            Err(e) => Files {
+                state: FilesState::Error(e.into()),
+                runid,
+            },
+        }
+    }
+}
+
+impl Iterator for Files<'_> {
+    type Item = Result<File, Error>;
+
+    fn next(&mut self) -> Option<Result<File, Error>> {
+        let mut state = FilesState::Done;
+        mem::swap(&mut state, &mut self.state);
+        match state {
+            FilesState::Rows(mut rows) => {
+                let res = rows.with_rows_mut(|rows| -> Result<Option<File>, Error> {
+                    match rows.next()? {
+                        Some(row) => {
+                            let f = File::from_cols_with_runid(row, self.runid)?;
+                            Ok(Some(f))
+                        }
+                        None => Ok(None),
+                    }
+                });
+                match res {
+                    Ok(Some(f)) => {
+                        self.state = FilesState::Rows(rows);
+                        Some(Ok(f))
+                    }
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
+                }
+            }
+            FilesState::Error(e) => Some(Err(e)),
+            FilesState::Done => None,
+        }
+    }
+}
+
+impl FusedIterator for Files<'_> {}
+
+enum FilesState<'tx> {
+    Rows(FilesRows<'tx>),
+    Error(Error),
+    Done,
+}
+
+#[self_referencing]
+struct FilesRows<'tx> {
+    stmt: Statement<'tx>,
+    #[borrows(mut stmt)]
+    #[covariant]
+    rows: Rows<'this>,
 }
 
 /// Kinds of file errors.

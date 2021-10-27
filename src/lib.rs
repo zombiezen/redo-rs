@@ -111,6 +111,7 @@ macro_rules! log_debug3 {
 }
 
 pub mod builder;
+mod cycles;
 mod deps;
 mod env;
 mod helpers;

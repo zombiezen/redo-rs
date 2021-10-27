@@ -50,6 +50,7 @@ use std::time::Duration;
 use tempfile::{self, Builder as TempFileBuilder};
 use zombiezen_const_cstr::const_cstr;
 
+use super::cycles;
 use super::deps::Dirtiness;
 use super::env::{Env, OptionalBool};
 use super::helpers::{self, OsBytes};
@@ -301,6 +302,7 @@ impl BuildJob<'_> {
                 Ok(newp) => newp,
                 Err(_) => return 1,
             };
+            // CDPATH apparently caused unexpected 'cd' output on some platforms.
             env::remove_var("CDPATH");
             env::set_var(
                 "REDO_PWD",
@@ -327,7 +329,7 @@ impl BuildJob<'_> {
             if ps.env().verbose == 1 {
                 env::set_var("REDO_VERBOSE", "0");
             }
-            // TODO(soon): cycles.add(self.lock.fid)
+            cycles::add(lock.file_id().to_string());
             if !df.do_dir.as_os_str().is_empty() {
                 if env::set_current_dir(&df.do_dir).is_err() {
                     return 1;
@@ -860,8 +862,7 @@ where
                         })?,
                     None,
                 );
-                // TODO(someday): Check for cyclic dependency error.
-                lock.check();
+                lock.check()?;
                 // this sequence looks a little silly, but the idea is to
                 // give up our personal token while we wait for the lock to
                 // be released; but we should never run ensure_token() while
@@ -1192,6 +1193,8 @@ pub enum BuildErrorKind {
     FailedInAnotherThread(String),
     #[fail(display = "Invalid target {:?}", _0)]
     InvalidTarget(String),
+    #[fail(display = "Cyclic dependency detected")]
+    CyclicDependency,
 }
 
 impl BuildError {

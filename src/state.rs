@@ -46,6 +46,8 @@ use std::rc::Rc;
 use std::str;
 use std::time::{Duration, SystemTime};
 
+use super::builder::BuildError;
+use super::cycles;
 use super::env::Env;
 use super::helpers;
 
@@ -1114,7 +1116,7 @@ impl LockManager {
     /// Bug exists at least in WSL "4.4.0-17134-Microsoft #471-Microsoft".
     ///
     /// Returns `true` if broken, `false` otherwise.
-    pub(crate) fn detect_broken_locks(manager: Rc<LockManager>) -> nix::Result<bool> {
+    pub(crate) fn detect_broken_locks(manager: Rc<LockManager>) -> Result<bool, Error> {
         let child_manager_ref = manager.clone();
         let mut pl = Lock::new(manager, 0);
         // We wait for the lock here, just in case others are doing
@@ -1124,7 +1126,7 @@ impl LockManager {
             Ok(ForkResult::Parent { child: pid }) => match wait::waitpid(pid, None) {
                 Ok(WaitStatus::Exited(_, status)) => Ok(status != 0),
                 Ok(_) => Ok(true),
-                Err(e) => Err(e),
+                Err(e) => Err(e.into()),
             },
             Ok(ForkResult::Child) => {
                 // Doesn't actually unlock, since child process doesn't own it.
@@ -1149,7 +1151,7 @@ impl LockManager {
                     }
                 }
             }
-            Err(e) => Err(e),
+            Err(e) => Err(e.into()),
         }
     }
 }
@@ -1188,10 +1190,16 @@ impl Lock {
         }
     }
 
+    #[inline]
+    pub(crate) fn file_id(&self) -> i32 {
+        self.fid
+    }
+
     /// Check that this lock is in a sane state.
-    pub(crate) fn check(&self) {
+    pub(crate) fn check(&self) -> Result<(), BuildError> {
         assert!(!self.owned);
-        // TODO(soon): cycles.check(self.fid)
+        cycles::check(self.fid.to_string())?;
+        Ok(())
     }
 
     #[inline]
@@ -1205,8 +1213,8 @@ impl Lock {
     }
 
     /// Non-blocking try to acquire our lock; returns true if it worked.
-    pub fn try_lock(&mut self) -> nix::Result<bool> {
-        self.check();
+    pub fn try_lock(&mut self) -> Result<bool, Error> {
+        self.check()?;
         assert!(!self.owned);
         let result = fcntl::fcntl(
             self.manager.file.as_raw_fd(),
@@ -1218,13 +1226,13 @@ impl Lock {
                 Ok(true)
             }
             Err(nix::Error::Sys(Errno::EACCES)) | Err(nix::Error::Sys(Errno::EAGAIN)) => Ok(false),
-            Err(e) => Err(e),
+            Err(e) => Err(e.into()),
         }
     }
 
     /// Try to acquire our lock, and wait if it's currently locked.
-    pub fn wait_lock(&mut self, lock_type: LockType) -> nix::Result<()> {
-        self.check();
+    pub fn wait_lock(&mut self, lock_type: LockType) -> Result<(), Error> {
+        self.check()?;
         assert!(!self.owned);
         let fcntl_type = match lock_type {
             LockType::Exclusive => libc::F_WRLCK,

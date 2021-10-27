@@ -949,7 +949,7 @@ where
 }
 
 fn try_stat<P: AsRef<Path>>(path: P) -> io::Result<Option<Metadata>> {
-    match path.as_ref().metadata() {
+    match path.as_ref().symlink_metadata() {
         Ok(m) => Ok(Some(m)),
         Err(e) => match e.kind() {
             io::ErrorKind::NotFound => Ok(None),

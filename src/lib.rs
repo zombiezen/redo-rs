@@ -119,7 +119,7 @@ pub mod logs;
 mod paths;
 mod state;
 
-pub use deps::{is_dirty, Dirtiness};
+pub use deps::{is_dirty, Dirtiness, DirtyCallbacks, DirtyCallbacksBuilder};
 pub use env::{Env, OptionalBool};
 pub use helpers::{abs_path, normpath};
 pub use jobserver::JobServer;

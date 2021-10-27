@@ -102,7 +102,7 @@ fn should_build(ptx: &mut ProcessTransaction, t: &str) -> Result<(bool, Dirtines
         // TODO(soon): ImmediateReturn(32)
         return Err(format_err!("target {} failed", t));
     }
-    let dirty = match redo::is_dirty(ptx, &mut f)? {
+    let dirty = match redo::is_dirty(ptx, &mut f, &mut Default::default())? {
         Dirtiness::NeedTargets(t) if t.len() == 1 && t[0].id() == f.id() => Dirtiness::Dirty,
         d => d,
     };

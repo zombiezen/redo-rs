@@ -21,16 +21,28 @@ use std::cmp;
 use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 
+use super::env::Env;
 use super::state::{self, DepMode, File, ProcessTransaction, Stamp};
 
 /// Determine if the given `File` needs to be built.
-pub fn is_dirty(ptx: &mut ProcessTransaction, f: &mut File) -> Result<Dirtiness, Error> {
+pub fn is_dirty(
+    ptx: &mut ProcessTransaction,
+    f: &mut File,
+    cb: &mut DirtyCallbacks,
+) -> Result<Dirtiness, Error> {
     let runid = ptx
         .state()
         .env()
         .runid
         .ok_or_else(|| format_err!("RUNID not set"))?;
-    private_is_dirty(ptx, MutOrOwned::MutBorrowed(f), "", runid, &HashSet::new())
+    private_is_dirty(
+        ptx,
+        MutOrOwned::MutBorrowed(f),
+        "",
+        runid,
+        &HashSet::new(),
+        cb,
+    )
 }
 
 /// Determine if the given `File` needs to be built.
@@ -47,6 +59,7 @@ fn private_is_dirty(
     depth: &str,
     max_changed: i64,
     already_checked: &HashSet<i64>,
+    cb: &mut DirtyCallbacks,
 ) -> Result<Dirtiness, Error> {
     if already_checked.contains(&f.id()) {
         return Err(format_err!("cyclic dependency"));
@@ -88,7 +101,7 @@ fn private_is_dirty(
         }
         _ => {}
     }
-    if f.is_checked(ptx.state().env()) {
+    if (cb.is_checked)(&f, ptx.state().env()) {
         if ptx.state().env().debug >= 1 {
             log_debug!("{}-- CLEAN (checked)\n", depth);
         }
@@ -154,6 +167,7 @@ fn private_is_dirty(
                             f.checked_runid.unwrap_or(0),
                         ),
                         &already_checked,
+                        cb,
                     )?
                 };
                 if !sub.is_clean() {
@@ -210,9 +224,9 @@ fn private_is_dirty(
 
     // if we get here, it's because the target is clean
     if f.is_override {
-        state::warn_override(&f.name);
+        (cb.log_override)(&f.name);
     }
-    f.set_checked_save(ptx)?;
+    (cb.set_checked)(&mut f, ptx)?;
     Ok(Dirtiness::Clean)
 }
 
@@ -245,6 +259,74 @@ impl Dirtiness {
 impl Default for Dirtiness {
     fn default() -> Self {
         Dirtiness::Clean
+    }
+}
+
+/// Hooks for the [`is_dirty`] function.
+pub struct DirtyCallbacks<'a> {
+    is_checked: Box<dyn Fn(&File, &Env) -> bool + 'a>,
+    set_checked: Box<dyn FnMut(&mut File, &mut ProcessTransaction<'_>) -> Result<(), Error> + 'a>,
+    log_override: Box<dyn Fn(&str) + 'a>,
+}
+
+impl<'a> Default for DirtyCallbacks<'a> {
+    /// Default hooks read from and write to the state.
+    fn default() -> DirtyCallbacks<'a> {
+        DirtyCallbacks {
+            is_checked: Box::new(File::is_checked),
+            set_checked: Box::new(File::set_checked_save),
+            log_override: Box::new(state::warn_override),
+        }
+    }
+}
+
+impl<'a> From<DirtyCallbacksBuilder<'a>> for DirtyCallbacks<'a> {
+    fn from(b: DirtyCallbacksBuilder<'a>) -> DirtyCallbacks<'a> {
+        b.build()
+    }
+}
+
+/// Builder for [`DirtyCallbacks`].
+#[derive(Default)]
+pub struct DirtyCallbacksBuilder<'a> {
+    callbacks: DirtyCallbacks<'a>,
+}
+
+impl<'a> DirtyCallbacksBuilder<'a> {
+    #[inline]
+    pub fn new() -> DirtyCallbacksBuilder<'a> {
+        DirtyCallbacksBuilder::default()
+    }
+
+    /// Sets the `is_checked` callback.
+    #[inline]
+    pub fn is_checked<F: Fn(&File, &Env) -> bool + 'a>(mut self, f: F) -> Self {
+        self.callbacks.is_checked = Box::new(f);
+        self
+    }
+
+    /// Sets the `set_checked` callback.
+    #[inline]
+    pub fn set_checked<
+        F: FnMut(&mut File, &mut ProcessTransaction<'_>) -> Result<(), Error> + 'a,
+    >(
+        mut self,
+        f: F,
+    ) -> Self {
+        self.callbacks.set_checked = Box::new(f);
+        self
+    }
+
+    /// Sets the function called when a target is clean but the user modified it.
+    #[inline]
+    pub fn log_override<F: Fn(&str) + 'a>(mut self, f: F) -> Self {
+        self.callbacks.log_override = Box::new(f);
+        self
+    }
+
+    #[inline]
+    pub fn build(self) -> DirtyCallbacks<'a> {
+        self.callbacks
     }
 }
 

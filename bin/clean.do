@@ -3,4 +3,11 @@ rm -f \
   redo \
   redo-always \
   redo-ifchange \
-  redo-log
+  redo-ifcreate \
+  redo-log \
+  redo-ood \
+  redo-sources \
+  redo-stamp \
+  redo-targets \
+  redo-unlocked \
+  redo-whichdo

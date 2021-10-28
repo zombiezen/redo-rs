@@ -23,6 +23,17 @@ fn integration_test() {
     let redo_path = Path::new(env!("CARGO_BIN_EXE_redo"));
 
     let status = Command::new(redo_path)
+        .current_dir(crate_dir)
+        .arg(Path::new("redo").join("py"))
+        .arg(Path::new("redo").join("sh"))
+        .arg(Path::new("redo").join("whichpython"))
+        .spawn()
+        .expect("could not build prereqs")
+        .wait()
+        .expect("could not get exit status");
+    assert!(status.success(), "prereq build status = {:?}", status);
+
+    let status = Command::new(redo_path)
         .current_dir(crate_dir.join("t"))
         .spawn()
         .expect("could not start integration test")

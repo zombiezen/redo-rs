@@ -324,7 +324,7 @@ impl BuildJob<'_> {
                 depth
             });
             if ps.env().xtrace == 1 {
-                env::set_var("REDO_TARGET", "0");
+                env::set_var("REDO_XTRACE", "0");
             }
             if ps.env().verbose == 1 {
                 env::set_var("REDO_VERBOSE", "0");

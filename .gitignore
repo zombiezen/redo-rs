@@ -12,6 +12,7 @@
 /redo/py
 /redo/sh
 /redo/whichpython
+*.tmp
 
 # Minimal do script files
 .do_built

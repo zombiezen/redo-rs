@@ -99,21 +99,20 @@ impl Env {
                 targets.iter().map(AsRef::as_ref).collect()
             };
             let cwd = env::current_dir()?;
-            let maybe_dirs: Vec<Option<PathBuf>> = targets
+            let dirs: Vec<PathBuf> = targets
                 .iter()
-                .map(|t| {
+                .filter_map(|t| {
                     Path::new(t)
                         .parent()
                         .map(|par| helpers::abs_path(&cwd, &par).into_owned())
                 })
                 .collect();
-            if maybe_dirs.iter().any(|o| o.is_none()) {
+            if dirs.len() != targets.len() {
                 return Err(format_err!("invalid targets"));
             }
             let orig_base = common_path::common_path_all(
-                maybe_dirs
-                    .iter()
-                    .map(|o| o.as_ref().unwrap().as_ref())
+                dirs.iter()
+                    .map(|p| p as &Path)
                     .chain(iter::once(cwd.as_ref())),
             )
             .unwrap();
@@ -128,9 +127,9 @@ impl Env {
                 }
                 base = if b.pop() {
                     // up to parent
-                    None
-                } else {
                     Some(b)
+                } else {
+                    None
                 };
             }
             env::set_var("REDO_BASE", base.unwrap_or(orig_base));

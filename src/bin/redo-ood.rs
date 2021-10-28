@@ -27,7 +27,7 @@ use redo::logs::LogBuilder;
 use redo::{self, DirtyCallbacksBuilder, Env, File, Files, ProcessState, ProcessTransaction};
 
 fn main() {
-    redo::run_program("redo-targets", run);
+    redo::run_program("redo-ood", run);
 }
 
 fn run() -> Result<(), Error> {

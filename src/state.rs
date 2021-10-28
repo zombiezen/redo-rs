@@ -355,7 +355,7 @@ pub struct File {
     pub(crate) changed_runid: Option<i64>,
     pub(crate) failed_runid: Option<i64>,
     pub(crate) stamp: Option<Stamp>,
-    pub(crate) csum: Option<String>,
+    csum: String,
 }
 
 const FILE_COLS: &str = "Files.rowid as \"rowid\", \
@@ -460,7 +460,7 @@ impl File {
             changed_runid: row.get("changed_runid")?,
             failed_runid: row.get("failed_runid")?,
             stamp: row.get("stamp")?,
-            csum: row.get("csum")?,
+            csum: row.get::<&str, Option<String>>("csum")?.unwrap_or_default(),
         };
         if f.name == ALWAYS {
             if let Some(env_runid) = runid {
@@ -489,6 +489,24 @@ impl File {
         self.is_generated
     }
 
+    #[inline]
+    pub fn set_generated(&mut self) {
+        self.is_generated = true;
+        self.is_override = false;
+        self.failed_runid = None;
+    }
+
+    /// Returns the file's checksum. An empty string means no checksum.
+    #[inline]
+    pub fn checksum(&self) -> &str {
+        &self.csum
+    }
+
+    #[inline]
+    pub fn set_checksum(&mut self, csum: String) {
+        self.csum = csum;
+    }
+
     pub(crate) fn refresh(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
         *self = File::from_id(ptx, self.id)?;
         Ok(())
@@ -511,14 +529,18 @@ impl File {
                 self.changed_runid,
                 self.failed_runid,
                 self.stamp,
-                self.csum,
+                if self.csum.is_empty() {
+                    None
+                } else {
+                    Some(&self.csum)
+                },
                 self.id
             ),
         )?;
         Ok(())
     }
 
-    fn set_checked(&mut self, v: &Env) {
+    pub fn set_checked(&mut self, v: &Env) {
         self.checked_runid = v.runid;
     }
 

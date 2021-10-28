@@ -134,7 +134,7 @@ fn private_is_dirty(
                 } else {
                     log_debug!("{}-- DIRTY (mtime)\n", depth);
                 }
-                return Ok(if f.csum.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+                return Ok(if !f.checksum().is_empty() {
                     Dirtiness::NeedTargets(vec![f.into_owned()])
                 } else {
                     Dirtiness::Dirty
@@ -176,7 +176,7 @@ fn private_is_dirty(
                 }
             }
         }
-        if f.csum.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+        if f.checksum().is_empty() {
             // f is a "normal" target: dirty f2 means f is instantly dirty
             match dirty {
                 Dirtiness::Dirty => {

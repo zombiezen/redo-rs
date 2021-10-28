@@ -603,7 +603,7 @@ impl BuildJob<'_> {
                         .expect("target file stat failed"),
                 );
             } else {
-                sf.csum = None;
+                sf.set_checksum(String::new());
                 if let Err(e) = sf.update_stamp(ptx.state().env(), false) {
                     log_err!("{:?}: update stamp: {}", t, e);
                     rv = BuildJob::INTERNAL_ERROR_EXIT;

@@ -119,28 +119,13 @@ use std::time::{Duration, Instant};
 
 use super::helpers::{self, IntervalTimer, IntervalTimerValue};
 
-#[cfg(feature = "debug-jobserver")]
 macro_rules! debug_jobserver {
     ($($arg:tt)*) => {{
-        let s = format!($($arg)*);
-        eprintln!("job#{}: {}", ::std::process::id(), s);
+        if std::cfg!(feature = "debug-jobserver") {
+            let s = std::format!($($arg)*);
+            std::eprintln!("job#{}: {}", ::std::process::id(), s);
+        }
     }}
-}
-
-#[cfg(all(not(feature = "debug-jobserver"), not(debug_assertions)))]
-macro_rules! debug_jobserver {
-    ($($arg:tt)*) => {};
-}
-
-#[cfg(all(not(feature = "debug-jobserver"), debug_assertions))]
-macro_rules! debug_jobserver {
-    ($($arg:expr),*) => {{
-        $(
-            {
-                let _ = $arg;
-            }
-        )*
-    }};
 }
 
 /// Metadata about a running job.

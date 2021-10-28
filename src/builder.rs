@@ -474,6 +474,7 @@ impl BuildJob<'_> {
             }
             let _ = unistd::execvp(&argv[0], argv.as_slice());
             // Returns only if execvp failed.
+            eprintln!("Failed to exec: {:?}", argv);
             1
         })?;
         let lock = self.lock;
@@ -913,10 +914,14 @@ where
                     }
                     .start(ps_ref.clone(), ptx, server)
                     .context(BuildErrorKind::Generic)?;
-                    job_futures.push(Box::pin(async {
+                    let t = t.to_string();
+                    let result = &result;
+                    job_futures.push(Box::pin(async move {
                         let rv = job.await;
                         if rv != 0 {
-                            result.set(Err(BuildErrorKind::Generic.into()));
+                            result.set(Err(format_err!("{:?}: exit code {}", t, rv)
+                                .context(BuildErrorKind::Generic)
+                                .into()));
                         }
                     }));
                 }

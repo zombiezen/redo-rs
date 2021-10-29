@@ -33,7 +33,6 @@ use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::cmp;
 use std::collections::{HashSet, VecDeque};
-use std::convert::TryInto;
 use std::env;
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fmt::{self, Display};
@@ -54,7 +53,7 @@ use zombiezen_const_cstr::const_cstr;
 use super::cycles;
 use super::deps::Dirtiness;
 use super::env::{Env, OptionalBool};
-use super::helpers::{self, OsBytes};
+use super::helpers::{self, OsBytes, RedoPath, RedoPathBuf};
 use super::jobserver::JobServerHandle;
 use super::logs::{self, LogBuilder};
 use super::paths;
@@ -62,11 +61,11 @@ use super::state::{self, Lock, LockType, ProcessState, ProcessTransaction, Stamp
 
 struct BuildJob<'a> {
     /// Original target name. (Not relative to `Env.base`).
-    t: String,
+    t: RedoPathBuf,
     sf: state::File,
     lock: Lock,
     should_build_func:
-        Rc<dyn Fn(&mut ProcessTransaction, &str) -> Result<(bool, Dirtiness), Error> + 'a>,
+        Rc<dyn Fn(&mut ProcessTransaction, &RedoPath) -> Result<(bool, Dirtiness), Error> + 'a>,
 }
 
 impl BuildJob<'_> {
@@ -82,7 +81,7 @@ impl BuildJob<'_> {
         mut ptx: ProcessTransaction<'_>,
         server: &JobServerHandle,
     ) -> Result<Pin<Box<dyn Future<Output = i32> + 'a>>, Error> {
-        let before_t = try_stat(&self.t)?;
+        let before_t = try_stat(self.t.as_path())?;
         debug_assert!(self.lock.is_owned());
         let (is_target, dirty) = (self.should_build_func)(&mut ptx, &self.t)?;
         match dirty {
@@ -91,7 +90,7 @@ impl BuildJob<'_> {
                 if is_target {
                     logs::meta(
                         "unchanged",
-                        &state::target_relpath(ptx.state().env(), &self.t)?.to_string_lossy(),
+                        state::target_relpath(ptx.state().env(), &self.t)?.as_str(),
                         None,
                     );
                 }
@@ -130,7 +129,7 @@ impl BuildJob<'_> {
             && (sf.is_override || Stamp::detect_override(sf.stamp.as_ref().unwrap(), &newstamp))
         {
             let nice_t = nice(ptx.state().env(), &t)?;
-            state::warn_override(nice_t.to_str().expect("could not format target to string"));
+            state::warn_override(&nice_t);
             if !sf.is_override {
                 log_warn!("{:?} - old: {:?}\n", &nice_t, &sf.stamp);
                 log_warn!("{:?} - old: {:?}\n", &nice_t, &newstamp);
@@ -266,30 +265,17 @@ impl BuildJob<'_> {
                 .tempfile_in(lfend.parent().unwrap())?;
             lfd.persist(lfend)?;
         }
-        let mut dof = state::File::from_name(
-            &mut ptx,
-            df.do_dir
-                .join(&df.do_file)
-                .to_str()
-                .ok_or_else(|| format_err!("invalid file name"))?,
-            true,
-        )?;
+        let mut dof = state::File::from_name(&mut ptx, &df.do_dir.join(&df.do_file), true)?;
         dof.set_static(ptx.state().env())?;
         dof.save(&mut ptx)?;
         let ps = ptx.commit()?;
-        logs::meta(
-            "do",
-            state::target_relpath(ps.env(), &t)?
-                .to_str()
-                .ok_or_else(|| format_err!("invalid target name"))?,
-            None,
-        );
+        logs::meta("do", state::target_relpath(ps.env(), &t)?.as_str(), None);
 
         // Wrap out_file in a Cell, since we drop it in the subprocess.
         // Rust can't tell that the closure is not called in the parent process.
         let out_file = Cell::new(Some(out_file));
 
-        let job = server.start(t.clone(), || {
+        let job = server.start(t.as_str().to_string(), || {
             // TODO(someday): Log errors.
             use std::iter::FromIterator;
 
@@ -441,30 +427,28 @@ impl BuildJob<'_> {
         //  the target we started with.  But that makes this one process's
         //  build recursive, where currently it's flat.
         let here = env::current_dir()?;
-        let fix = |p: &str| -> io::Result<CString> {
+        let fix = |p: &RedoPath| -> io::Result<CString> {
             state::relpath(ptx.state().env().base().join(p), &here)
                 .map(|p| CString::new(Vec::from_iter(OsBytes::new(&p))).unwrap())
         };
         let mut argv: Vec<Cow<CStr>> = vec![
             Cow::Borrowed(const_cstr!("redo-unlocked").as_cstr()),
-            Cow::Owned(fix(&self.sf.name)?),
+            Cow::Owned(fix(self.sf.name())?),
         ];
         {
             let mut names: HashSet<CString> = HashSet::new();
             for d in targets {
-                names.insert(fix(&d.name)?);
+                names.insert(fix(d.name())?);
             }
             argv.extend(names.drain().map(|s| Cow::Owned(s)));
         }
         logs::meta(
             "check",
-            state::target_relpath(ptx.state().env(), &self.t)?
-                .to_str()
-                .expect("could not format target as string"),
+            state::target_relpath(ptx.state().env(), &self.t)?.as_str(),
             None,
         );
         let state = ptx.commit()?;
-        let job = server.start(self.t, || {
+        let job = server.start(self.t.into_string(), || {
             env::set_var("REDO_DEPTH", {
                 let mut depth = state.env().depth().to_string();
                 depth.push_str("  ");
@@ -495,7 +479,7 @@ impl BuildJob<'_> {
     /// the new file stamp data for the completed target.
     fn record_new_state<A: AsRef<OsStr>>(
         ptx: &mut ProcessTransaction<'_>,
-        t: &str,
+        t: &RedoPath,
         mut sf: state::File,
         before_t: &Option<Metadata>,
         mut out_file: File,
@@ -636,8 +620,7 @@ impl BuildJob<'_> {
                 rv,
                 state::target_relpath(ptx.state().env(), &t)
                     .expect("cannot format target as relative path")
-                    .to_str()
-                    .expect("cannot format target as string")
+                    .as_str()
             ),
             None,
         );
@@ -653,20 +636,20 @@ impl BuildJob<'_> {
 /// needs to be built, as of the time it is called. The first return value
 /// indicates whether the target is a generated file and the second is the
 /// dirtiness.
-pub async fn run<S, F>(
+pub async fn run<P, F>(
     ps: &mut ProcessState,
     server: &JobServerHandle,
-    targets: &[S],
+    targets: &[P],
     should_build_func: F,
 ) -> Result<(), BuildError>
 where
-    S: AsRef<str>,
-    F: Fn(&mut ProcessTransaction, &str) -> Result<(bool, Dirtiness), Error>,
+    P: AsRef<RedoPath>,
+    F: Fn(&mut ProcessTransaction, &RedoPath) -> Result<(bool, Dirtiness), Error>,
 {
     use futures::future::FutureExt;
     use futures::stream::StreamExt;
     use rand::seq::SliceRandom;
-    use std::convert::TryFrom;
+    use std::convert::{TryFrom, TryInto};
     use std::iter::FromIterator;
 
     let mut target_order = Vec::from_iter(0..targets.len());
@@ -675,25 +658,16 @@ where
     }
 
     let should_build_func = Rc::new(should_build_func);
-    for i in target_order.iter().copied() {
-        let t = targets[i].as_ref();
-        if t.find('\n').is_some() {
-            log_err!("{:?}: filenames containing newlines are not allowed.\n", t);
-            return Err(BuildErrorKind::InvalidTarget(t.into()).into());
-        }
-    }
-
     let mut me: Option<(PathBuf, state::File, Lock)> =
-        if !ps.env().target.as_os_str().is_empty() && !ps.env().unlocked {
+        if !ps.env().target().as_os_str().is_empty() && !ps.env().unlocked {
             let mut me = PathBuf::from(&ps.env().startdir);
             me.push(&ps.env().pwd);
-            me.push(&ps.env().target);
+            me.push(ps.env().target());
             let myfile = {
                 let mut ptx = ProcessTransaction::new(ps, TransactionBehavior::Deferred)
                     .context(BuildErrorKind::Generic)?;
                 ptx.set_drop_behavior(DropBehavior::Commit);
-                state::File::from_name(&mut ptx, &me.to_string_lossy(), true)
-                    .context(BuildErrorKind::Generic)?
+                state::File::from_name(&mut ptx, &me, true).context(BuildErrorKind::Generic)?
             };
             let selflock = ps.new_lock(state::LOG_LOCK_MAGIC + (myfile.id() as i32));
             Some((me, myfile, selflock))
@@ -702,7 +676,7 @@ where
         };
 
     let result: Cell<Result<(), BuildError>> = Cell::new(Ok(()));
-    let mut locked: VecDeque<(i64, &str)> = VecDeque::new();
+    let mut locked: VecDeque<(i64, &RedoPath)> = VecDeque::new();
     let mut cheat = || -> Result<i32, Error> {
         let selflock = match &mut me {
             Some((_, _, ref mut selflock)) => selflock,
@@ -726,7 +700,7 @@ where
     let job_futures: FuturesUnordered<Pin<Box<dyn Future<Output = ()>>>> = FuturesUnordered::new();
     pin_mut!(job_futures);
     {
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<RedoPathBuf> = HashSet::new();
         for i in target_order.iter().copied() {
             let t = targets[i].as_ref();
             if t.is_empty() {
@@ -740,7 +714,7 @@ where
             }
             seen.insert(t.into());
             // TODO(maybe): Commit state if !has_token.
-            let token_future = server.ensure_token_or_cheat(t, &mut cheat).fuse();
+            let token_future = server.ensure_token_or_cheat(t.as_str(), &mut cheat).fuse();
             pin_mut!(token_future);
             wait_for(token_future, job_futures.as_mut())
                 .await
@@ -773,11 +747,7 @@ where
                         "locked",
                         state::target_relpath(ptx.state().env(), &t)
                             .context(BuildErrorKind::Generic)?
-                            .to_str()
-                            .ok_or_else(|| {
-                                format_err!("could not format target as string")
-                                    .context(BuildErrorKind::Generic)
-                            })?,
+                            .as_str(),
                         None,
                     );
                     locked.push_back((f.id(), t));
@@ -857,11 +827,7 @@ where
                     "waiting",
                     state::target_relpath(ps_ref.borrow().env(), &t)
                         .context(BuildErrorKind::Generic)?
-                        .to_str()
-                        .ok_or_else(|| {
-                            format_err!("could not format target as string")
-                                .context(BuildErrorKind::Generic)
-                        })?,
+                        .as_str(),
                     None,
                 );
                 lock.check()?;
@@ -876,7 +842,7 @@ where
                 // to build it.
                 lock.unlock().context(BuildErrorKind::Generic)?;
                 server
-                    .ensure_token_or_cheat(t, &mut cheat)
+                    .ensure_token_or_cheat(t.as_str(), &mut cheat)
                     .await
                     .context(BuildErrorKind::Generic)?;
                 lock.try_lock().context(BuildErrorKind::Generic)?;
@@ -885,11 +851,7 @@ where
                 "unlocked",
                 state::target_relpath(ps_ref.borrow().env(), &t)
                     .context(BuildErrorKind::Generic)?
-                    .to_str()
-                    .ok_or_else(|| {
-                        format_err!("could not format target as string")
-                            .context(BuildErrorKind::Generic)
-                    })?,
+                    .as_str(),
                 None,
             );
             {
@@ -900,15 +862,16 @@ where
                 let file =
                     state::File::from_name(&mut ptx, t, true).context(BuildErrorKind::Generic)?;
                 if file.is_failed(ptx.state().env()) {
-                    result.set(Err(
-                        BuildErrorKind::FailedInAnotherThread(t.to_string()).into()
-                    ));
+                    result.set(Err(BuildErrorKind::FailedInAnotherThread(
+                        t.to_redo_path_buf(),
+                    )
+                    .into()));
                     lock.unlock().context(BuildErrorKind::Generic)?;
                 } else {
                     let sf =
                         state::File::from_id(&mut ptx, fid).context(BuildErrorKind::Generic)?;
                     let job = BuildJob {
-                        t: t.to_string(),
+                        t: t.to_redo_path_buf(),
                         sf,
                         lock,
                         should_build_func: should_build_func.clone(),
@@ -1196,9 +1159,9 @@ pub enum BuildErrorKind {
     #[fail(display = "Build failed")]
     Generic,
     #[fail(display = "{:?}: failed in another thread", _0)]
-    FailedInAnotherThread(String),
+    FailedInAnotherThread(RedoPathBuf),
     #[fail(display = "Invalid target {:?}", _0)]
-    InvalidTarget(String),
+    InvalidTarget(RedoPathBuf),
     #[fail(display = "Cyclic dependency detected")]
     CyclicDependency,
 }
@@ -1257,6 +1220,9 @@ impl From<&BuildErrorKind> for i32 {
     }
 }
 
-fn nice<P: AsRef<Path>>(env: &Env, t: P) -> io::Result<PathBuf> {
-    state::relpath(t, env.startdir())
+fn nice<P: AsRef<RedoPath>>(env: &Env, t: P) -> io::Result<RedoPathBuf> {
+    use std::convert::TryInto;
+    state::relpath(t.as_ref(), env.startdir())?
+        .try_into()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }

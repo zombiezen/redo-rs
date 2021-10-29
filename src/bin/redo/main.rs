@@ -38,7 +38,7 @@ use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
 use redo::logs::LogBuilder;
 use redo::{
     self, log_err, log_warn, Dirtiness, Env, JobServer, OptionalBool, ProcessState,
-    ProcessTransaction,
+    ProcessTransaction, RedoPath,
 };
 
 fn main() {
@@ -206,15 +206,18 @@ fn run_redo() -> Result<(), Error> {
     set_defint("REDO_LOG", auto_bool_arg(&matches, "log"));
     set_defint("REDO_PRETTY", auto_bool_arg(&matches, "pretty"));
     set_defint("REDO_COLOR", auto_bool_arg(&matches, "color"));
-    let mut targets: Vec<&str> = matches
-        .values_of("target")
-        .map(|v| v.collect())
-        .unwrap_or_default();
+    let mut targets = {
+        let mut targets = Vec::<&RedoPath>::new();
+        for arg in matches.values_of("target").unwrap_or_default() {
+            targets.push(RedoPath::from_str(arg)?);
+        }
+        targets
+    };
 
     let env = Env::init(targets.as_slice())?;
     let mut ps = ProcessState::init(env)?;
     if ps.is_toplevel() && targets.is_empty() {
-        targets.push("all");
+        targets.push(unsafe { RedoPath::from_str_unchecked("all") });
     }
     let mut j = str::parse::<i32>(matches.value_of("jobs").unwrap_or("0")).unwrap_or(0);
     if ps.is_toplevel() && (ps.env().log().unwrap_or(true) || j > 1) {

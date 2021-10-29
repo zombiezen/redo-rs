@@ -35,13 +35,7 @@ pub(crate) fn run() -> Result<(), Error> {
     me.push(env.target());
     let mut ps = ProcessState::init(env)?;
     let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Deferred)?;
-    let mut f = redo::File::from_name(
-        &mut ptx,
-        me.as_os_str()
-            .to_str()
-            .expect("invalid character in target name"),
-        true,
-    )?;
+    let mut f = redo::File::from_name(&mut ptx, &me, true)?;
     for t in std::env::args_os().skip(1) {
         if t.is_empty() {
             log_err!("cannot build the empty target (\"\").\n");

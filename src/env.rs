@@ -29,7 +29,7 @@ use std::rc::Rc;
 use std::str::FromStr;
 use tempfile::{self, TempDir};
 
-use super::helpers;
+use super::helpers::{self, RedoPath, RedoPathBuf};
 
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -37,7 +37,7 @@ pub struct Env {
     is_toplevel: bool,
     base: PathBuf,
     pub(crate) pwd: PathBuf,
-    pub(crate) target: PathBuf,
+    target: RedoPathBuf,
     depth: String,
     pub(crate) debug: i32,
     debug_locks: bool,
@@ -200,6 +200,8 @@ impl Env {
 
     /// Read environment (which must already be set) to get runtime settings.
     pub fn inherit() -> Result<Env, Error> {
+        use std::convert::TryInto;
+
         if !get_bool("REDO") {
             return Err(format_err!("must be run from inside a .do"));
         }
@@ -207,7 +209,7 @@ impl Env {
             is_toplevel: false,
             base: env::var_os("REDO_BASE").unwrap_or_default().into(),
             pwd: env::var_os("REDO_PWD").unwrap_or_default().into(),
-            target: env::var_os("REDO_TARGET").unwrap_or_default().into(),
+            target: env::var_os("REDO_TARGET").unwrap_or_default().try_into()?,
             depth: env::var("REDO_DEPTH").unwrap_or_default(),
             debug: get_int("REDO_DEBUG", 0) as i32,
             debug_locks: get_bool("REDO_DEBUG_LOCKS"),
@@ -260,7 +262,7 @@ impl Env {
     }
 
     #[inline]
-    pub fn target(&self) -> &Path {
+    pub fn target(&self) -> &RedoPath {
         &self.target
     }
 

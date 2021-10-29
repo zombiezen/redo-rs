@@ -122,10 +122,10 @@ mod state;
 
 pub use deps::{is_dirty, Dirtiness, DirtyCallbacks, DirtyCallbacksBuilder};
 pub use env::{Env, OptionalBool};
-pub use helpers::{abs_path, normpath};
+pub use helpers::{abs_path, normpath, RedoPath, RedoPathBuf};
 pub use jobserver::JobServer;
 pub use paths::{possible_do_files, DoFile, PossibleDoFiles};
 pub use state::{
-    logname, relpath, DepMode, File, FileError, FileErrorKind, Files, Lock, LockType, ProcessState,
-    ProcessTransaction, Stamp, ALWAYS, LOG_LOCK_MAGIC,
+    always_filename, logname, relpath, DepMode, File, FileError, FileErrorKind, Files, Lock,
+    LockType, ProcessState, ProcessTransaction, Stamp, LOG_LOCK_MAGIC,
 };

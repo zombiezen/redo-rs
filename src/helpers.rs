@@ -20,13 +20,524 @@ use nix::errno::{self, Errno};
 use nix::fcntl::{self, FcntlArg, FdFlag};
 use nix::unistd;
 use nix::{self, NixPath};
-use std::borrow::Cow;
+use rusqlite::types::{FromSql, FromSqlError, ToSql, ToSqlOutput};
+use std::borrow::{Borrow, Cow};
 use std::char;
-use std::ffi::{OsStr, OsString};
+use std::convert::TryFrom;
+use std::ffi::{CStr, CString, OsStr, OsString};
+use std::fmt::{self, Debug, Display, Formatter};
 use std::iter::FusedIterator;
+use std::mem;
+use std::ops::Deref;
 use std::os::unix::io::RawFd;
-use std::path::{self, Path};
+use std::path::{self, Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
+
+/// A slice of a path (akin to [`str`]).
+///
+/// This type guarantees that the path contains no nul bytes or newline bytes
+/// and is valid UTF-8.
+#[derive(Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[repr(transparent)]
+pub struct RedoPath(OsStr);
+
+impl RedoPath {
+    /// Coerces a UTF-8 string into a `RedoPath`.
+    ///
+    /// # Errors
+    ///
+    /// If the string contains any nul bytes, an error variant will be returned.
+    pub fn from_str<S: AsRef<str> + ?Sized>(s: &S) -> Result<&RedoPath, RedoPathError> {
+        let s = s.as_ref();
+        if RedoPath::validate(s) {
+            Ok(unsafe { RedoPath::from_str_unchecked(s) })
+        } else {
+            Err(RedoPathError {
+                input: RedoPathErrorInput::String(s.to_string()),
+            })
+        }
+    }
+
+    fn validate(s: &str) -> bool {
+        !s.contains(|c| c == '\0' || c == '\n')
+    }
+
+    /// Coerces a UTF-8 string into a `RedoPath` without any runtime checks.
+    pub unsafe fn from_str_unchecked<S: AsRef<str> + ?Sized>(s: &S) -> &RedoPath {
+        mem::transmute(OsStr::new(s.as_ref()))
+    }
+
+    /// Coerces a platform-native string into a `RedoPath`.
+    ///
+    /// # Errors
+    ///
+    /// If the string contains any nul bytes or is not valid UTF-8, an error
+    /// variant will be returned.
+    pub fn from_os_str<S: AsRef<OsStr> + ?Sized>(s: &S) -> Result<&RedoPath, RedoPathError> {
+        let s = s.as_ref();
+        match s.to_str() {
+            Some(s) => RedoPath::from_str(s),
+            None => Err(RedoPathError {
+                input: RedoPathErrorInput::OsString(s.to_os_string()),
+            }),
+        }
+    }
+
+    /// Coerces a platform-native string into a `RedoPath` without any runtime checks.
+    pub unsafe fn from_os_str_unchecked<S: AsRef<OsStr> + ?Sized>(s: &S) -> &RedoPath {
+        mem::transmute(s.as_ref())
+    }
+
+    /// Reports whether the `RedoPath` is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Yields the underlying [`OsStr`] slice.
+    #[inline]
+    pub fn as_os_str(&self) -> &OsStr {
+        &self.0
+    }
+
+    /// Yields the underlying [`OsStr`] slice as a [`Path`].
+    #[inline]
+    pub fn as_path(&self) -> &Path {
+        Path::new(self.as_os_str())
+    }
+
+    /// Yields the underlying [`str`] slice.
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        self.0.to_str().unwrap()
+    }
+
+    /// Creates a C-compatible string.
+    #[inline]
+    pub fn to_c_string(&self) -> CString {
+        let v = self.as_str().as_bytes().to_vec();
+        unsafe { CString::from_vec_unchecked(v) }
+    }
+
+    /// Copies the slice into an owned `RedoPathBuf`.
+    #[inline]
+    pub fn to_redo_path_buf(&self) -> RedoPathBuf {
+        let s = self.0.to_os_string();
+        unsafe { mem::transmute(s) }
+    }
+
+    /// Returns the `RedoPath` without its final component, if there is one.
+    pub fn parent(&self) -> Option<&RedoPath> {
+        self.as_path()
+            .parent()
+            .map(|p: &Path| unsafe { mem::transmute(p.as_os_str()) })
+    }
+
+    /// Returns the final component of the `RedoPath`, if there is one.
+    pub fn file_name(&self) -> Option<&RedoPath> {
+        self.as_path()
+            .file_name()
+            .map(|s: &OsStr| unsafe { mem::transmute(s) })
+    }
+
+    /// Return the shortest path name equivalent to path by purely lexical
+    /// processing.
+    ///
+    /// See [`normpath`] for details.
+    pub fn normpath(&self) -> Cow<RedoPath> {
+        match normpath(self) {
+            Cow::Borrowed(p) => Cow::Borrowed(unsafe { RedoPath::from_os_str_unchecked(p) }),
+            Cow::Owned(p) => {
+                Cow::Owned(unsafe { RedoPathBuf::from_os_string_unchecked(p.into_os_string()) })
+            }
+        }
+    }
+}
+
+impl Default for &RedoPath {
+    #[inline]
+    fn default() -> Self {
+        let p = OsStr::new("");
+        unsafe { mem::transmute(p) }
+    }
+}
+
+impl AsRef<RedoPath> for RedoPath {
+    #[inline]
+    fn as_ref(&self) -> &RedoPath {
+        self
+    }
+}
+
+impl AsRef<str> for RedoPath {
+    #[inline]
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<OsStr> for RedoPath {
+    #[inline]
+    fn as_ref(&self) -> &OsStr {
+        self.as_os_str()
+    }
+}
+
+impl AsRef<Path> for RedoPath {
+    #[inline]
+    fn as_ref(&self) -> &Path {
+        self.as_path()
+    }
+}
+
+impl ToSql for RedoPath {
+    fn to_sql(&self) -> Result<ToSqlOutput, rusqlite::Error> {
+        self.as_str().to_sql()
+    }
+}
+
+impl<'a> From<&'a RedoPath> for Cow<'a, RedoPath> {
+    #[inline]
+    fn from(p: &'a RedoPath) -> Cow<'a, RedoPath> {
+        Cow::Borrowed(p)
+    }
+}
+
+impl Debug for RedoPath {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl Display for RedoPath {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl ToOwned for RedoPath {
+    type Owned = RedoPathBuf;
+
+    #[inline]
+    fn to_owned(&self) -> RedoPathBuf {
+        self.to_redo_path_buf()
+    }
+}
+
+impl NixPath for RedoPath {
+    fn is_empty(&self) -> bool {
+        RedoPath::is_empty(self)
+    }
+
+    fn len(&self) -> usize {
+        self.as_str().as_bytes().len()
+    }
+
+    fn with_nix_path<T, F>(&self, f: F) -> Result<T, nix::Error>
+    where
+        F: FnOnce(&CStr) -> T,
+    {
+        let cs = self.to_c_string();
+        Ok(f(&cs))
+    }
+}
+
+/// A type that represents owned, mutable platform-native strings.
+///
+/// This type guarantees that the path contains no nul bytes and is valid UTF-8.
+#[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[repr(transparent)]
+pub struct RedoPathBuf(OsString);
+
+impl RedoPathBuf {
+    /// Constructs a new empty `RedoPathBuf`.
+    #[inline]
+    pub fn new() -> RedoPathBuf {
+        RedoPathBuf(OsString::new())
+    }
+
+    /// Coerces a UTF-8 string into a `RedoPathBuf` without any runtime checks.
+    ///
+    /// This conversion does not allocate or copy memory.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the string does not contain any nul bytes.
+    #[inline]
+    pub unsafe fn from_string_unchecked(s: String) -> RedoPathBuf {
+        RedoPathBuf::from_os_string_unchecked(OsString::from(s))
+    }
+
+    /// Coerces a platform-native string into a `RedoPath` without any runtime checks.
+    ///
+    /// This conversion does not allocate or copy memory.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the string contains valid UTF-8 and does not
+    /// contain any nul bytes.
+    #[inline]
+    pub unsafe fn from_os_string_unchecked(s: OsString) -> RedoPathBuf {
+        RedoPathBuf(s)
+    }
+
+    /// Coerces to a [`RedoPath`] slice.
+    #[inline]
+    pub fn as_redo_path(&self) -> &RedoPath {
+        let p = self.0.as_os_str();
+        unsafe { RedoPath::from_os_str_unchecked(p) }
+    }
+
+    /// Converts the `RedoPathBuf` into an [`OsString`].
+    #[inline]
+    pub fn into_os_string(self) -> OsString {
+        self.0
+    }
+
+    /// Converts the `RedoPathBuf` into a [`PathBuf`].
+    #[inline]
+    pub fn into_path_buf(self) -> PathBuf {
+        PathBuf::from(self.0)
+    }
+
+    /// Converts the `RedoPathBuf` into a [`String`].
+    #[inline]
+    pub fn into_string(self) -> String {
+        self.0.into_string().unwrap()
+    }
+}
+
+impl Default for RedoPathBuf {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TryFrom<String> for RedoPathBuf {
+    type Error = RedoPathError;
+
+    /// Coerces a UTF-8 string into a `RedoPathBuf`.
+    ///
+    /// This conversion does not allocate or copy memory.
+    ///
+    /// # Errors
+    ///
+    /// If the string contains any nul bytes, an error variant will be returned.
+    fn try_from(s: String) -> Result<RedoPathBuf, RedoPathError> {
+        if RedoPath::validate(&s) {
+            Ok(unsafe { RedoPathBuf::from_string_unchecked(s) })
+        } else {
+            Err(RedoPathError {
+                input: RedoPathErrorInput::String(s.to_string()),
+            })
+        }
+    }
+}
+
+impl TryFrom<OsString> for RedoPathBuf {
+    type Error = RedoPathError;
+
+    /// Coerces a platform-native string into a `RedoPathBuf`.
+    ///
+    /// This conversion does not allocate or copy memory.
+    ///
+    /// # Errors
+    ///
+    /// If the string contains any nul bytes or is not valid UTF-8, an error
+    /// variant will be returned.
+    fn try_from(s: OsString) -> Result<RedoPathBuf, RedoPathError> {
+        match s.into_string() {
+            Ok(s) => RedoPathBuf::try_from(s),
+            Err(s) => Err(RedoPathError {
+                input: RedoPathErrorInput::OsString(s.to_os_string()),
+            }),
+        }
+    }
+}
+
+impl TryFrom<PathBuf> for RedoPathBuf {
+    type Error = RedoPathError;
+
+    #[inline]
+    fn try_from(s: PathBuf) -> Result<RedoPathBuf, RedoPathError> {
+        TryFrom::try_from(s.into_os_string())
+    }
+}
+
+impl Deref for RedoPathBuf {
+    type Target = RedoPath;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.as_redo_path()
+    }
+}
+
+impl AsRef<RedoPath> for RedoPathBuf {
+    #[inline]
+    fn as_ref(&self) -> &RedoPath {
+        unsafe { RedoPath::from_os_str_unchecked(self.as_os_str()) }
+    }
+}
+
+impl AsRef<RedoPathBuf> for RedoPathBuf {
+    #[inline]
+    fn as_ref(&self) -> &RedoPathBuf {
+        self
+    }
+}
+
+impl AsRef<OsStr> for RedoPathBuf {
+    #[inline]
+    fn as_ref(&self) -> &OsStr {
+        self.as_os_str()
+    }
+}
+
+impl AsRef<Path> for RedoPathBuf {
+    #[inline]
+    fn as_ref(&self) -> &Path {
+        Path::new(self.as_os_str())
+    }
+}
+
+impl AsRef<str> for RedoPathBuf {
+    #[inline]
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl From<RedoPathBuf> for OsString {
+    #[inline]
+    fn from(p: RedoPathBuf) -> OsString {
+        p.into_os_string()
+    }
+}
+
+impl From<RedoPathBuf> for PathBuf {
+    #[inline]
+    fn from(p: RedoPathBuf) -> PathBuf {
+        p.into_path_buf()
+    }
+}
+
+impl From<RedoPathBuf> for String {
+    #[inline]
+    fn from(p: RedoPathBuf) -> String {
+        p.into_string()
+    }
+}
+
+impl<'a> From<&'a RedoPath> for RedoPathBuf {
+    #[inline]
+    fn from(p: &'a RedoPath) -> RedoPathBuf {
+        p.to_redo_path_buf()
+    }
+}
+
+impl FromStr for RedoPathBuf {
+    type Err = RedoPathError;
+
+    #[inline]
+    fn from_str(s: &str) -> Result<RedoPathBuf, RedoPathError> {
+        RedoPath::from_str(s).map(RedoPath::to_redo_path_buf)
+    }
+}
+
+impl ToSql for RedoPathBuf {
+    fn to_sql(&self) -> Result<ToSqlOutput, rusqlite::Error> {
+        self.as_str().to_sql()
+    }
+}
+
+impl FromSql for RedoPathBuf {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> Result<Self, FromSqlError> {
+        use std::convert::TryInto;
+        let s: String = FromSql::column_result(value)?;
+        s.try_into().map_err(|e| FromSqlError::Other(Box::new(e)))
+    }
+}
+
+impl<'a> From<Cow<'a, RedoPath>> for RedoPathBuf {
+    #[inline]
+    fn from(c: Cow<'a, RedoPath>) -> RedoPathBuf {
+        c.into_owned()
+    }
+}
+
+impl<'a> From<RedoPathBuf> for Cow<'a, RedoPath> {
+    #[inline]
+    fn from(p: RedoPathBuf) -> Cow<'a, RedoPath> {
+        Cow::Owned(p)
+    }
+}
+
+impl Borrow<RedoPath> for RedoPathBuf {
+    #[inline]
+    fn borrow(&self) -> &RedoPath {
+        &*self
+    }
+}
+
+impl Debug for RedoPathBuf {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl Display for RedoPathBuf {
+    #[inline]
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl NixPath for RedoPathBuf {
+    fn is_empty(&self) -> bool {
+        RedoPath::is_empty(self)
+    }
+
+    fn len(&self) -> usize {
+        self.as_str().as_bytes().len()
+    }
+
+    fn with_nix_path<T, F>(&self, f: F) -> Result<T, nix::Error>
+    where
+        F: FnOnce(&CStr) -> T,
+    {
+        let cs = self.to_c_string();
+        Ok(f(&cs))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RedoPathError {
+    input: RedoPathErrorInput,
+}
+
+impl Display for RedoPathError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let s: &dyn Debug = match &self.input {
+            RedoPathErrorInput::OsString(s) => s,
+            RedoPathErrorInput::String(s) => s,
+        };
+        write!(f, "could not use {:?} as redo path", s)
+    }
+}
+
+impl std::error::Error for RedoPathError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RedoPathErrorInput {
+    OsString(OsString),
+    String(String),
+}
 
 pub(crate) fn close_on_exec(fd: RawFd, yes: bool) -> nix::Result<()> {
     let result = fcntl::fcntl(fd, FcntlArg::F_GETFD)?;

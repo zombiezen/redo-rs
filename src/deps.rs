@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 
 use super::env::Env;
+use super::helpers::RedoPath;
 use super::state::{self, DepMode, File, ProcessTransaction, Stamp};
 
 /// Determine if the given `File` needs to be built.
@@ -149,7 +150,7 @@ fn private_is_dirty(
         let mut dirty = Dirtiness::Clean;
         match mode {
             DepMode::Created => {
-                if ptx.state().env().base().join(&f2.name).exists() {
+                if ptx.state().env().base().join(f2.name()).exists() {
                     log_debug!("{}-- DIRTY (created)\n", depth);
                     dirty = Dirtiness::Dirty;
                 }
@@ -225,7 +226,7 @@ fn private_is_dirty(
 
     // if we get here, it's because the target is clean
     if f.is_override {
-        (cb.log_override)(&f.name);
+        (cb.log_override)(f.name());
     }
     (cb.set_checked)(&mut f, ptx)?;
     Ok(Dirtiness::Clean)
@@ -267,7 +268,7 @@ impl Default for Dirtiness {
 pub struct DirtyCallbacks<'a> {
     is_checked: Box<dyn Fn(&File, &Env) -> bool + 'a>,
     set_checked: Box<dyn FnMut(&mut File, &mut ProcessTransaction<'_>) -> Result<(), Error> + 'a>,
-    log_override: Box<dyn Fn(&str) + 'a>,
+    log_override: Box<dyn Fn(&RedoPath) + 'a>,
 }
 
 impl<'a> Default for DirtyCallbacks<'a> {
@@ -320,7 +321,7 @@ impl<'a> DirtyCallbacksBuilder<'a> {
 
     /// Sets the function called when a target is clean but the user modified it.
     #[inline]
-    pub fn log_override<F: Fn(&str) + 'a>(mut self, f: F) -> Self {
+    pub fn log_override<F: Fn(&RedoPath) + 'a>(mut self, f: F) -> Self {
         self.callbacks.log_override = Box::new(f);
         self
     }

@@ -50,12 +50,18 @@ use std::time::{Duration, SystemTime};
 use super::builder::BuildError;
 use super::cycles;
 use super::env::Env;
-use super::helpers;
+use super::helpers::{self, RedoPath, RedoPathBuf};
 
 const SCHEMA_VER: i32 = 2;
 
 /// An invalid filename that is always marked as dirty.
-pub const ALWAYS: &str = "//ALWAYS";
+const ALWAYS: &str = "//ALWAYS";
+
+/// Returns an invalid filename that is always marked as dirty.
+#[inline]
+pub fn always_filename() -> &'static RedoPath {
+    unsafe { RedoPath::from_str_unchecked(ALWAYS) }
+}
 
 /// fid offset for "log locks".
 pub const LOG_LOCK_MAGIC: i32 = 0x10000000;
@@ -349,7 +355,7 @@ fn connect<P: AsRef<Path>>(env: &Env, dbfile: P) -> rusqlite::Result<Connection>
 #[non_exhaustive]
 pub struct File {
     id: i64,
-    pub(crate) name: String,
+    name: RedoPathBuf,
     pub(crate) is_generated: bool,
     pub(crate) is_override: bool,
     pub(crate) checked_runid: Option<i64>,
@@ -370,13 +376,14 @@ const FILE_COLS: &str = "Files.rowid as \"rowid\", \
                          csum as \"csum\"";
 
 impl File {
-    pub fn from_name(
+    pub fn from_name<'a, P: AsRef<Path> + ?Sized>(
         ptx: &mut ProcessTransaction,
-        name: &str,
+        name: &'a P,
         allow_add: bool,
     ) -> Result<File, FileError> {
+        let name = name.as_ref();
         let q = format!("select {} from Files where name=?", FILE_COLS);
-        let normalized_name: Cow<str> = if name == ALWAYS {
+        let normalized_name: Cow<str> = if name == OsStr::new(ALWAYS) {
             Cow::Borrowed(&ALWAYS)
         } else {
             Cow::Owned(
@@ -463,7 +470,7 @@ impl File {
             stamp: row.get("stamp")?,
             csum: row.get::<&str, Option<String>>("csum")?.unwrap_or_default(),
         };
-        if f.name == ALWAYS {
+        if f.name.as_str() == ALWAYS {
             if let Some(env_runid) = runid {
                 f.changed_runid = Some(
                     f.changed_runid
@@ -481,7 +488,7 @@ impl File {
     }
 
     #[inline]
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &RedoPath {
         &self.name
     }
 
@@ -618,7 +625,7 @@ impl File {
 
     /// Reports if this object represents a source (not a target).
     pub fn is_source(&self, v: &Env) -> Result<bool, Error> {
-        if self.name.starts_with("//") {
+        if self.name.as_str().starts_with("//") {
             // Special name, ignore.
             return Ok(false);
         }
@@ -720,11 +727,11 @@ impl File {
     }
 
     /// Add a dependency and write it to the database.
-    pub fn add_dep(
+    pub fn add_dep<'a, P: AsRef<Path> + ?Sized>(
         &mut self,
         ptx: &mut ProcessTransaction,
         mode: DepMode,
-        dep: &str,
+        dep: &'a P,
     ) -> Result<(), Error> {
         let src = File::from_name(ptx, dep, true)?;
         log_debug3!(
@@ -1343,7 +1350,9 @@ pub fn relpath<P1: AsRef<Path>, P2: AsRef<Path>>(t: P1, base: P2) -> io::Result<
 /// TARGET relative to that, then find t relative to that.
 ///
 /// FIXME: find some cleaner terminology for all these different paths.
-pub(crate) fn target_relpath<P: AsRef<Path>>(env: &Env, t: P) -> io::Result<PathBuf> {
+pub(crate) fn target_relpath<P: AsRef<Path>>(env: &Env, t: P) -> Result<RedoPathBuf, Error> {
+    use std::convert::TryFrom;
+
     let cwd = std::env::current_dir()?;
     let rel_dofile_dir = env.startdir().join(env.pwd());
     let dofile_dir = helpers::abs_path(&cwd, &rel_dofile_dir);
@@ -1362,10 +1371,10 @@ pub(crate) fn target_relpath<P: AsRef<Path>>(env: &Env, t: P) -> io::Result<Path
             .to_path_buf()
     };
     let target_dir = helpers::abs_path(&cwd, &target_dir);
-    relpath(t, target_dir)
+    Ok(RedoPathBuf::try_from(relpath(t, target_dir)?)?)
 }
 
-pub(crate) fn warn_override(name: &str) {
+pub(crate) fn warn_override(name: &RedoPath) {
     log_warn!("{} - you modified it; skipping\n", name);
 }
 

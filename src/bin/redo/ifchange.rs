@@ -23,15 +23,24 @@ use std::path::PathBuf;
 use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
 use redo::logs::LogBuilder;
 use redo::{
-    self, log_debug2, log_err, DepMode, Dirtiness, Env, JobServer, ProcessState, ProcessTransaction,
+    self, log_debug2, log_err, DepMode, Dirtiness, Env, JobServer, ProcessState,
+    ProcessTransaction, RedoPath, RedoPathBuf,
 };
 
 pub(crate) fn run() -> Result<(), Error> {
-    let mut targets: Vec<String> = std::env::args().skip(1).collect();
+    use std::convert::TryFrom;
+
+    let mut targets = {
+        let mut targets = Vec::<RedoPathBuf>::new();
+        for arg in std::env::args_os().skip(1) {
+            targets.push(RedoPathBuf::try_from(arg)?);
+        }
+        targets
+    };
     let env = Env::init(targets.as_slice())?;
     let mut ps = ProcessState::init(env)?;
     if ps.is_toplevel() && targets.is_empty() {
-        targets.push(String::from("all"));
+        targets.push(unsafe { RedoPathBuf::from_string_unchecked("all".into()) });
     }
     let mut _stdin_log_reader: Option<StdinLogReader> = None; // held during operation
     if ps.is_toplevel() && ps.env().log().unwrap_or(true) {
@@ -51,11 +60,7 @@ pub(crate) fn run() -> Result<(), Error> {
             me.push(ptx.state().env().startdir());
             me.push(ptx.state().env().pwd());
             me.push(ptx.state().env().target());
-            let f = redo::File::from_name(
-                &mut ptx,
-                me.as_os_str().to_str().expect("invalid target name"),
-                true,
-            )?;
+            let f = redo::File::from_name(&mut ptx, &me, true)?;
             log_debug2!(
                 "TARGET: {:?} {:?} {:?}\n",
                 ptx.state().env().startdir(),
@@ -93,7 +98,7 @@ pub(crate) fn run() -> Result<(), Error> {
     build_result.map_err(|e| e.into()).and(return_tokens_result)
 }
 
-fn should_build(ptx: &mut ProcessTransaction, t: &str) -> Result<(bool, Dirtiness), Error> {
+fn should_build(ptx: &mut ProcessTransaction, t: &RedoPath) -> Result<(bool, Dirtiness), Error> {
     let mut f = redo::File::from_name(ptx, t, true)?;
     if f.is_failed(ptx.state().env()) {
         // TODO(soon): ImmediateReturn(32)

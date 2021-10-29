@@ -15,7 +15,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use failure::{format_err, Error};
+use failure::Error;
 use ouroboros::self_referencing;
 use std::ffi::{OsStr, OsString};
 use std::iter::FusedIterator;
@@ -262,19 +262,19 @@ pub(crate) fn find_do_file(
     ptx: &mut ProcessTransaction,
     f: &mut state::File,
 ) -> Result<Option<DoFile>, Error> {
-    for do_file in possible_do_files(helpers::abs_path(ptx.state().env().base(), &f.name)) {
+    for do_file in possible_do_files(helpers::abs_path(ptx.state().env().base(), f.name())) {
         let do_path = do_file.do_dir.join(&do_file.do_file);
         log_debug2!(
             "{}: {}:{} ?\n",
-            f.name,
+            f.name(),
             do_file.do_dir.to_str().unwrap(),
             do_file.do_file.to_str().unwrap()
         );
         if do_path.exists() {
-            f.add_dep(ptx, DepMode::Modified, os_str_as_str(&do_path)?)?;
+            f.add_dep(ptx, DepMode::Modified, &do_path)?;
             return Ok(Some(do_file));
         } else {
-            f.add_dep(ptx, DepMode::Created, os_str_as_str(&do_path)?)?;
+            f.add_dep(ptx, DepMode::Created, &do_path)?;
         }
     }
     Ok(None)
@@ -297,12 +297,6 @@ fn path_splits<'a, P: AsRef<Path> + ?Sized>(p: &'a P) -> Vec<(&'a Path, &'a Path
     };
     let bases = p.ancestors();
     bases.zip(subs.into_iter().rev()).collect()
-}
-
-fn os_str_as_str<'a, S: AsRef<OsStr>>(s: &'a S) -> Result<&'a str, Error> {
-    let s = s.as_ref();
-    s.to_str()
-        .ok_or_else(|| format_err!("path {:?} is invalid UTF-8", s))
 }
 
 #[cfg(test)]

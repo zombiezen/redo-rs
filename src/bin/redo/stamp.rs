@@ -52,13 +52,7 @@ pub(crate) fn run() -> Result<(), Error> {
     me.push(env.target());
     let mut ps = ProcessState::init(env)?;
     let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Deferred)?;
-    let mut f = File::from_name(
-        &mut ptx,
-        me.as_os_str()
-            .to_str()
-            .ok_or(format_err!("unable to convert target to string"))?,
-        true,
-    )?;
+    let mut f = File::from_name(&mut ptx, &me, true)?;
     let changed = csum != f.checksum();
     log_debug2!("{}: old = {}", f.name(), f.checksum());
     log_debug2!(

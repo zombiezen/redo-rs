@@ -34,11 +34,9 @@ use std::time::{Duration, Instant};
 use redo::logs::{self, LogBuilder, Meta};
 use redo::{self, Env, Lock, LockType, ProcessState, ProcessTransaction};
 
-fn main() {
-    redo::run_program("redo-log", run);
-}
+use super::{auto_bool_arg, log_flags};
 
-fn run() -> Result<(), Error> {
+pub(crate) fn run() -> Result<(), Error> {
     use failure::ResultExt;
     use std::io::Write;
     use std::os::unix::io::FromRawFd;
@@ -55,7 +53,7 @@ fn run() -> Result<(), Error> {
         .arg(Arg::from_usage(
             "-f, --follow 'keep watching for more lines to be appended (like tail -f)'",
         ))
-        .args(&redo::redo_log_flags())
+        .args(&log_flags())
         .arg(Arg::from_usage("--ack-fd=[fd] 'print REDO-OK to this fd upon starting'").hidden(true))
         .arg(Arg::from_usage("<target>..."))
         .get_matches();
@@ -69,19 +67,19 @@ fn run() -> Result<(), Error> {
     }
 
     let mut env = Env::init(&targets)?;
-    if let Some(d) = redo::auto_bool_arg(&matches, "debug-locks").into() {
+    if let Some(d) = auto_bool_arg(&matches, "debug-locks").into() {
         env.set_debug_locks(d);
     }
-    if let Some(d) = redo::auto_bool_arg(&matches, "debug-pids").into() {
+    if let Some(d) = auto_bool_arg(&matches, "debug-pids").into() {
         env.set_debug_pids(d);
     }
     let mut ps = ProcessState::init(env)?;
-    let status = redo::auto_bool_arg(&matches, "status")
-        .unwrap_or_else(|| unistd::isatty(2).unwrap_or(false));
+    let status =
+        auto_bool_arg(&matches, "status").unwrap_or_else(|| unistd::isatty(2).unwrap_or(false));
     LogBuilder::new()
         .parent_logs(false)
-        .pretty(redo::auto_bool_arg(&matches, "pretty").unwrap_or(true))
-        .color(redo::auto_bool_arg(&matches, "color"))
+        .pretty(auto_bool_arg(&matches, "pretty").unwrap_or(true))
+        .color(auto_bool_arg(&matches, "color"))
         .setup(ps.env(), io::stdout());
     if let Some(ack_fd) = matches.value_of("ack-fd") {
         // Write back to owner, to let them know we started up okay and
@@ -288,7 +286,7 @@ impl LogState {
                     match g.kind() {
                         "unchanged" => {
                             if matches.is_present("unchanged") {
-                                if redo::auto_bool_arg(&matches, "debug-locks").unwrap_or(false) {
+                                if auto_bool_arg(&matches, "debug-locks").unwrap_or(false) {
                                     logs::meta(g.kind(), &relname, Some(g.pid()));
                                 } else if !self.already.contains(&fixname) {
                                     logs::meta("do", &relname, Some(g.pid()));
@@ -313,7 +311,7 @@ impl LogState {
                             }
                         }
                         "do" | "waiting" | "locked" | "unlocked" => {
-                            if redo::auto_bool_arg(&matches, "debug-locks").unwrap_or(false) {
+                            if auto_bool_arg(&matches, "debug-locks").unwrap_or(false) {
                                 logs::meta(g.kind(), &relname, Some(g.pid()));
                                 logs::write(line.trim_end());
                                 interrupted += 1;
@@ -366,7 +364,7 @@ impl LogState {
                     }
                 }
                 Err(_) => {
-                    if redo::auto_bool_arg(&matches, "details").unwrap_or(true) {
+                    if auto_bool_arg(&matches, "details").unwrap_or(true) {
                         if interrupted != 0 {
                             let d = ps.env().depth().len();
                             ps.env_mut().set_depth(d - 2);

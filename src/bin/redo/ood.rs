@@ -15,21 +15,19 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! List the known source (not target) files.
+//! List out-of-date targets (ood) targets.
 
 use failure::{format_err, Error};
 use rusqlite::TransactionBehavior;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::env;
 use std::io;
 
 use redo::logs::LogBuilder;
-use redo::{self, Env, Files, ProcessState, ProcessTransaction};
+use redo::{self, DirtyCallbacksBuilder, Env, File, Files, ProcessState, ProcessTransaction};
 
-fn main() {
-    redo::run_program("redo-sources", run);
-}
-
-fn run() -> Result<(), Error> {
+pub(crate) fn run() -> Result<(), Error> {
     if env::args_os().len() != 1 {
         return Err(format_err!("no arguments expected."));
     }
@@ -38,13 +36,28 @@ fn run() -> Result<(), Error> {
     let env = Env::init(targets)?;
     LogBuilder::from(&env).setup(&env, io::stderr());
 
-    let cwd = env::current_dir()?;
     let mut ps = ProcessState::init(env)?;
     let env2 = ps.env().clone();
     let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Deferred)?;
+    let cache: RefCell<HashSet<i64>> = RefCell::new(HashSet::new());
+    let mut cb = DirtyCallbacksBuilder::new()
+        .is_checked(|f, _| cache.borrow().contains(&f.id()))
+        .set_checked(|f, _| {
+            cache.borrow_mut().insert(f.id());
+            Ok(())
+        })
+        .log_override(|_| {})
+        .build();
+    let mut targets: Vec<File> = Vec::new();
     for resf in Files::list(&mut ptx) {
         let f = resf?;
-        if f.is_source(&env2)? {
+        if f.is_target(&env2)? {
+            targets.push(f);
+        }
+    }
+    let cwd = env::current_dir()?;
+    for mut f in targets {
+        if !redo::is_dirty(&mut ptx, &mut f, &mut cb)?.is_clean() {
             let p = redo::relpath(env2.base().join(f.name()), &cwd)?;
             println!(
                 "{}",

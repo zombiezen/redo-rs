@@ -1,4 +1,5 @@
 // Copyright 2021 Ross Light
+// Copyright 2010-2018 Avery Pennarun and contributors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,11 +23,7 @@ use std::path::PathBuf;
 use redo::logs::LogBuilder;
 use redo::{self, DepMode, Env, ProcessState, ProcessTransaction, Stamp};
 
-fn main() {
-    redo::run_program("redo-always", run);
-}
-
-fn run() -> Result<(), Error> {
+pub(crate) fn run() -> Result<(), Error> {
     let env = Env::inherit()?;
     LogBuilder::from(&env).setup(&env, io::stderr());
 

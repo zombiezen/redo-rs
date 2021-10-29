@@ -24,12 +24,8 @@ use std::process;
 use redo::logs::LogBuilder;
 use redo::{self, log_err, DepMode, Env, ProcessState, ProcessTransaction};
 
-fn main() {
-    redo::run_program("redo-ifcreate", run);
-}
-
 /// Build the current target if these targets are created.
-fn run() -> Result<(), Error> {
+pub(crate) fn run() -> Result<(), Error> {
     let env = Env::inherit()?;
     LogBuilder::from(&env).setup(&env, io::stderr());
 

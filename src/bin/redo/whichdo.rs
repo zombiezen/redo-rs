@@ -26,11 +26,7 @@ use std::process;
 use redo::logs::LogBuilder;
 use redo::{self, log_err, Env};
 
-fn main() {
-    redo::run_program("redo-whichdo", run);
-}
-
-fn run() -> Result<(), Error> {
+pub(crate) fn run() -> Result<(), Error> {
     if env::args_os().len() != 2 {
         return Err(format_err!("exactly one argument expected."));
     }

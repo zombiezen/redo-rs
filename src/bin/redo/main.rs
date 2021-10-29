@@ -15,12 +15,24 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+mod always;
+mod ifchange;
+mod ifcreate;
+mod log;
+mod ood;
+mod sources;
+mod stamp;
+mod targets;
+mod unlocked;
+mod whichdo;
+
 use clap::{App, AppSettings, Arg};
 use failure::{format_err, Error};
 use rusqlite::TransactionBehavior;
+use std::env;
 use std::ffi::OsString;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
 use redo::logs::LogBuilder;
@@ -30,10 +42,91 @@ use redo::{
 };
 
 fn main() {
-    redo::run_program("redo", run);
+    let name = env::args_os()
+        .nth(0)
+        .and_then(|a0| {
+            PathBuf::from(a0)
+                .file_name()
+                .map(|base| base.to_os_string())
+        })
+        .unwrap_or("redo".into());
+    let result = match name.to_str() {
+        Some("redo-always") => always::run(),
+        Some("redo-ifchange") => ifchange::run(),
+        Some("redo-ifcreate") => ifcreate::run(),
+        Some("redo-log") => log::run(),
+        Some("redo-ood") => ood::run(),
+        Some("redo-sources") => sources::run(),
+        Some("redo-stamp") => stamp::run(),
+        Some("redo-targets") => targets::run(),
+        Some("redo-unlocked") => unlocked::run(),
+        Some("redo-whichdo") => whichdo::run(),
+        _ => run_redo(),
+    };
+    match result {
+        Ok(_) => std::process::exit(0),
+        Err(e) => {
+            if let Some(bt) = e
+                .iter_chain()
+                .filter_map(|f| f.backtrace().filter(|bt| !bt.is_empty()))
+                .last()
+            {
+                eprint!("Backtrace:\n{}\n\n", bt);
+            }
+            let msg = e.iter_chain().fold(String::new(), |mut s, e| {
+                use std::fmt::Write;
+                if !s.is_empty() {
+                    write!(s, ": ").unwrap();
+                }
+                write!(s, "{}", e).unwrap();
+                s
+            });
+            log_err!("{}: {}", name.to_string_lossy(), msg);
+            let retcode = e
+                .downcast_ref::<builder::BuildError>()
+                .map(|be| i32::from(be.kind()))
+                .unwrap_or(1);
+            std::process::exit(retcode)
+        }
+    }
 }
 
-fn run() -> Result<(), Error> {
+/// Return the common list of `redo-log` flags.
+pub(crate) fn log_flags() -> Vec<clap::Arg<'static, 'static>> {
+    vec![
+        Arg::from_usage("--no-details").help("only show 'redo' recursion trace, not build output"),
+        Arg::from_usage("--details")
+            .hidden(true)
+            .overrides_with("no-details"),
+        Arg::from_usage("--no-status")
+            .help("don't display build summary line at the bottom of the screen"),
+        Arg::from_usage("--status")
+            .hidden(true)
+            .overrides_with("no-status"),
+        Arg::from_usage("--no-pretty")
+            .help("don't pretty-print logs, show raw @@REDO output instead"),
+        Arg::from_usage("--pretty")
+            .hidden(true)
+            .overrides_with("no-pretty"),
+        Arg::from_usage("--no-color")
+            .help("disable ANSI color; --color to force enable (default: auto)"),
+        Arg::from_usage("--color")
+            .hidden(true)
+            .overrides_with("no-color"),
+        Arg::from_usage("--debug-locks 'print messages about file locking (useful for debugging)'"),
+        Arg::from_usage("--no-debug-locks")
+            .hidden(true)
+            .overrides_with("debug-locks"),
+        Arg::from_usage(
+            "--debug-pids 'print process ids as part of log messages (useful for debugging)'",
+        ),
+        Arg::from_usage("--no-debug-pids")
+            .hidden(true)
+            .overrides_with("debug-pids"),
+    ]
+}
+
+fn run_redo() -> Result<(), Error> {
     let matches = App::new("redo")
         .about("Build the listed targets whether they need it or not.")
         .setting(AppSettings::DeriveDisplayOrder)
@@ -65,7 +158,7 @@ fn run() -> Result<(), Error> {
                 .hidden(true)
                 .overrides_with("no-log"),
         )
-        .args(&redo::redo_log_flags())
+        .args(&log_flags())
         .arg(Arg::from_usage("[target]..."))
         .get_matches();
     {
@@ -86,16 +179,16 @@ fn run() -> Result<(), Error> {
             std::env::set_var("REDO_XTRACE", n.to_string());
         }
     }
-    if redo::auto_bool_arg(&matches, "keep-going").unwrap_or(false) {
+    if auto_bool_arg(&matches, "keep-going").unwrap_or(false) {
         std::env::set_var("REDO_KEEP_GOING", "1");
     }
-    if redo::auto_bool_arg(&matches, "shuffle").unwrap_or(false) {
+    if auto_bool_arg(&matches, "shuffle").unwrap_or(false) {
         std::env::set_var("REDO_SHUFFLE", "1");
     }
-    if redo::auto_bool_arg(&matches, "debug-locks").unwrap_or(false) {
+    if auto_bool_arg(&matches, "debug-locks").unwrap_or(false) {
         std::env::set_var("REDO_DEBUG_LOCKS", "1");
     }
-    if redo::auto_bool_arg(&matches, "debug-pids").unwrap_or(false) {
+    if auto_bool_arg(&matches, "debug-pids").unwrap_or(false) {
         std::env::set_var("REDO_DEBUG_PIDS", "1");
     }
     fn set_defint(name: &str, val: OptionalBool) {
@@ -110,9 +203,9 @@ fn run() -> Result<(), Error> {
             }),
         );
     }
-    set_defint("REDO_LOG", redo::auto_bool_arg(&matches, "log"));
-    set_defint("REDO_PRETTY", redo::auto_bool_arg(&matches, "pretty"));
-    set_defint("REDO_COLOR", redo::auto_bool_arg(&matches, "color"));
+    set_defint("REDO_LOG", auto_bool_arg(&matches, "log"));
+    set_defint("REDO_PRETTY", auto_bool_arg(&matches, "pretty"));
+    set_defint("REDO_COLOR", auto_bool_arg(&matches, "color"));
     let mut targets: Vec<&str> = matches
         .values_of("target")
         .map(|v| v.collect())
@@ -131,10 +224,10 @@ fn run() -> Result<(), Error> {
     if ps.is_toplevel() && ps.env().log().unwrap_or(true) {
         _stdin_log_reader = Some(
             StdinLogReaderBuilder::from(ps.env())
-                .set_status(redo::auto_bool_arg(&matches, "status").unwrap_or(true))
-                .set_details(redo::auto_bool_arg(&matches, "details").unwrap_or(true))
-                .set_debug_locks(redo::auto_bool_arg(&matches, "debug-locks").unwrap_or(false))
-                .set_debug_pids(redo::auto_bool_arg(&matches, "debug-pids").unwrap_or(false))
+                .set_status(auto_bool_arg(&matches, "status").unwrap_or(true))
+                .set_details(auto_bool_arg(&matches, "details").unwrap_or(true))
+                .set_debug_locks(auto_bool_arg(&matches, "debug-locks").unwrap_or(false))
+                .set_debug_pids(auto_bool_arg(&matches, "debug-pids").unwrap_or(false))
                 .start(ps.env())?,
         );
     } else {
@@ -180,4 +273,23 @@ fn run() -> Result<(), Error> {
         log_err!("unexpected error: {}", e);
     }
     build_result.map_err(|e| e.into()).and(return_tokens_result)
+}
+
+/// Converts an argument pair match of `name` and `"no-" + name` into a tri-state.
+pub(crate) fn auto_bool_arg<S: AsRef<str>>(matches: &clap::ArgMatches, name: S) -> OptionalBool {
+    let name = name.as_ref();
+    const NEGATIVE_PREFIX: &str = "no-";
+    let negative_name = {
+        let mut negative_name = String::with_capacity(name.len() + NEGATIVE_PREFIX.len());
+        negative_name.push_str(NEGATIVE_PREFIX);
+        negative_name.push_str(name);
+        negative_name
+    };
+    if matches.is_present(name) {
+        OptionalBool::On
+    } else if matches.is_present(negative_name) {
+        OptionalBool::Off
+    } else {
+        OptionalBool::Auto
+    }
 }

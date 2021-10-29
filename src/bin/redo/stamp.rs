@@ -26,11 +26,7 @@ use std::path::PathBuf;
 use redo::logs::LogBuilder;
 use redo::{self, log_debug2, Env, File, ProcessState, ProcessTransaction};
 
-fn main() {
-    redo::run_program("redo-stamp", run);
-}
-
-fn run() -> Result<(), Error> {
+pub(crate) fn run() -> Result<(), Error> {
     use sha1::Digest;
 
     if env::args_os().len() != 1 {

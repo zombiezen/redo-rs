@@ -23,8 +23,11 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::iter;
+use std::os::unix::fs as unixfs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::str::FromStr;
+use tempfile::{self, TempDir};
 
 use super::helpers;
 
@@ -52,12 +55,15 @@ pub struct Env {
     pub(crate) runid: Option<i64>,
     pub(crate) unlocked: bool,
     pub(crate) no_oob: bool,
+
+    redo_links_dir: Option<Rc<TempDir>>,
 }
 
 impl Env {
     /// Start a session (if needed) for a command that does need the state db.
     pub fn init<T: AsRef<str>>(targets: &[T]) -> Result<Env, Error> {
         let mut is_toplevel = false;
+        let mut redo_links_dir = None;
         if !get_bool("REDO") {
             is_toplevel = true;
             let exe_path = env::current_exe()?;
@@ -77,10 +83,19 @@ impl Env {
             try_names.extend(dir_names.iter().map(|&p| Cow::Borrowed(p)));
 
             let mut dirs: Vec<Cow<Path>> = Vec::new();
+            let mut found_unlocked = false;
             for k in try_names {
+                if !found_unlocked && k.join("redo-unlocked").exists() {
+                    found_unlocked = true;
+                }
                 if !dirs.iter().any(|k2| k2 == &k) {
                     dirs.push(k);
                 }
+            }
+            if !found_unlocked {
+                let d = Env::make_redo_links_dir(&exe_path)?;
+                dirs.push(Cow::Owned(d.path().to_path_buf()));
+                redo_links_dir = Some(Rc::new(d));
             }
             let old_path = env::var_os("PATH").unwrap_or_default();
             let mut new_path = OsString::new();
@@ -138,8 +153,33 @@ impl Env {
         }
         Ok(Env {
             is_toplevel,
+            redo_links_dir,
             ..Env::inherit()?
         })
+    }
+
+    fn make_redo_links_dir(exe_path: &Path) -> Result<TempDir, Error> {
+        let d = tempfile::tempdir()?;
+        const BINARIES: &[&str] = &[
+            "redo",
+            "redo-always",
+            "redo-ifchange",
+            "redo-ifcreate",
+            "redo-log",
+            "redo-ood",
+            "redo-sources",
+            "redo-stamp",
+            "redo-targets",
+            "redo-unlocked",
+            "redo-whichdo",
+        ];
+        let mut path = d.path().to_path_buf();
+        for name in BINARIES {
+            path.push(name);
+            unixfs::symlink(exe_path, &path)?;
+            path.pop();
+        }
+        Ok(d)
     }
 
     /// Start a session (if needed) for a command that needs no state db.
@@ -188,6 +228,7 @@ impl Env {
             },
             unlocked: get_bool("REDO_UNLOCKED"),
             no_oob: get_bool("REDO_NO_OOB"),
+            redo_links_dir: None,
         };
         if v.depth.contains(|c| c != ' ') {
             return Err(format_err!(

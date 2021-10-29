@@ -26,11 +26,7 @@ use redo::{
     self, log_debug2, log_err, DepMode, Dirtiness, Env, JobServer, ProcessState, ProcessTransaction,
 };
 
-fn main() {
-    redo::run_program("redo-ifchange", run);
-}
-
-fn run() -> Result<(), Error> {
+pub(crate) fn run() -> Result<(), Error> {
     let mut targets: Vec<String> = std::env::args().skip(1).collect();
     let env = Env::init(targets.as_slice())?;
     let mut ps = ProcessState::init(env)?;

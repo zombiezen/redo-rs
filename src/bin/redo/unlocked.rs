@@ -26,11 +26,7 @@ use std::process::{self, Command};
 use redo::logs::LogBuilder;
 use redo::{self, Env};
 
-fn main() {
-    redo::run_program("redo-unlocked", run);
-}
-
-fn run() -> Result<(), Error> {
+pub(crate) fn run() -> Result<(), Error> {
     let mut args = env::args_os();
     if args.len() < 3 {
         return Err(format_err!("at least 2 arguments expected."));

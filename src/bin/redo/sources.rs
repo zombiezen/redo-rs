@@ -15,7 +15,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! List the known targets (not sources).
+//! List the known source (not target) files.
 
 use failure::{format_err, Error};
 use rusqlite::TransactionBehavior;
@@ -25,11 +25,7 @@ use std::io;
 use redo::logs::LogBuilder;
 use redo::{self, Env, Files, ProcessState, ProcessTransaction};
 
-fn main() {
-    redo::run_program("redo-targets", run);
-}
-
-fn run() -> Result<(), Error> {
+pub(crate) fn run() -> Result<(), Error> {
     if env::args_os().len() != 1 {
         return Err(format_err!("no arguments expected."));
     }
@@ -44,7 +40,7 @@ fn run() -> Result<(), Error> {
     let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Deferred)?;
     for resf in Files::list(&mut ptx) {
         let f = resf?;
-        if f.is_target(&env2)? {
+        if f.is_source(&env2)? {
             let p = redo::relpath(env2.base().join(f.name()), &cwd)?;
             println!(
                 "{}",

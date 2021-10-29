@@ -65,7 +65,7 @@ impl RedoPath {
 
     /// Coerces a UTF-8 string into a `RedoPath` without any runtime checks.
     pub unsafe fn from_str_unchecked<S: AsRef<str> + ?Sized>(s: &S) -> &RedoPath {
-        mem::transmute(OsStr::new(s.as_ref()))
+        RedoPath::from_os_str_unchecked(OsStr::new(s.as_ref()))
     }
 
     /// Coerces a platform-native string into a `RedoPath`.
@@ -85,6 +85,7 @@ impl RedoPath {
     }
 
     /// Coerces a platform-native string into a `RedoPath` without any runtime checks.
+    #[inline]
     pub unsafe fn from_os_str_unchecked<S: AsRef<OsStr> + ?Sized>(s: &S) -> &RedoPath {
         mem::transmute(s.as_ref())
     }
@@ -124,21 +125,21 @@ impl RedoPath {
     #[inline]
     pub fn to_redo_path_buf(&self) -> RedoPathBuf {
         let s = self.0.to_os_string();
-        unsafe { mem::transmute(s) }
+        unsafe { RedoPathBuf::from_os_string_unchecked(s) }
     }
 
     /// Returns the `RedoPath` without its final component, if there is one.
     pub fn parent(&self) -> Option<&RedoPath> {
         self.as_path()
             .parent()
-            .map(|p: &Path| unsafe { mem::transmute(p.as_os_str()) })
+            .map(|p| unsafe { RedoPath::from_os_str_unchecked(p) })
     }
 
     /// Returns the final component of the `RedoPath`, if there is one.
     pub fn file_name(&self) -> Option<&RedoPath> {
         self.as_path()
             .file_name()
-            .map(|s: &OsStr| unsafe { mem::transmute(s) })
+            .map(|s| unsafe { RedoPath::from_os_str_unchecked(s) })
     }
 
     /// Return the shortest path name equivalent to path by purely lexical
@@ -158,8 +159,7 @@ impl RedoPath {
 impl Default for &RedoPath {
     #[inline]
     fn default() -> Self {
-        let p = OsStr::new("");
-        unsafe { mem::transmute(p) }
+        unsafe { RedoPath::from_os_str_unchecked(OsStr::new("")) }
     }
 }
 

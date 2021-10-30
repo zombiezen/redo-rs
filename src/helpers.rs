@@ -15,7 +15,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use libc::{c_int, itimerval, timeval};
+use libc::{c_int, itimerval, suseconds_t, time_t, timeval};
 use nix::errno::{self, Errno};
 use nix::fcntl::{self, FcntlArg, FdFlag};
 use nix::unistd;
@@ -645,8 +645,8 @@ pub(crate) fn duration_from_timeval(tv: &timeval) -> Duration {
 #[inline]
 pub(crate) const fn timeval_from_duration(d: Duration) -> timeval {
     timeval {
-        tv_sec: d.as_secs() as i64,
-        tv_usec: d.subsec_micros() as i64,
+        tv_sec: d.as_secs() as time_t,
+        tv_usec: d.subsec_micros() as suseconds_t,
     }
 }
 

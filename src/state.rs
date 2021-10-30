@@ -16,7 +16,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use failure::{format_err, Backtrace, Context, Error, Fail, ResultExt};
-use libc::{self, c_int, c_short, flock, off_t};
+use libc::{self, c_short, flock, off_t};
 use libsqlite3_sys;
 use nix;
 use nix::errno::Errno;
@@ -40,6 +40,7 @@ use std::fs::{self, Metadata, OpenOptions};
 use std::io;
 use std::iter::FusedIterator;
 use std::mem;
+use std::num::TryFromIntError;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -64,7 +65,7 @@ pub fn always_filename() -> &'static RedoPath {
 }
 
 /// fid offset for "log locks".
-pub const LOG_LOCK_MAGIC: i32 = 0x10000000;
+pub const LOG_LOCK_MAGIC: i64 = 0x10000000;
 
 /// Connection to the state database.
 #[derive(Debug)]
@@ -221,7 +222,7 @@ impl ProcessState {
     }
 
     #[inline]
-    pub fn new_lock(&self, fid: i32) -> Lock {
+    pub fn new_lock(&self, fid: i64) -> Lock {
         Lock::new(self.lock_manager.clone(), fid)
     }
 
@@ -1120,7 +1121,7 @@ impl ToSql for Stamp {
 #[derive(Debug)]
 pub(crate) struct LockManager {
     file: fs::File,
-    locks: RefCell<HashSet<i32>>,
+    locks: RefCell<HashSet<i64>>,
 }
 
 impl LockManager {
@@ -1204,11 +1205,11 @@ impl Default for LockType {
 pub struct Lock {
     manager: Rc<LockManager>,
     owned: bool,
-    fid: i32,
+    fid: i64,
 }
 
 impl Lock {
-    fn new(manager: Rc<LockManager>, fid: i32) -> Lock {
+    fn new(manager: Rc<LockManager>, fid: i64) -> Lock {
         {
             let mut locks = manager.locks.borrow_mut();
             assert!(locks.insert(fid));
@@ -1221,7 +1222,7 @@ impl Lock {
     }
 
     #[inline]
-    pub(crate) fn file_id(&self) -> i32 {
+    pub(crate) fn file_id(&self) -> i64 {
         self.fid
     }
 
@@ -1248,7 +1249,7 @@ impl Lock {
         assert!(!self.owned);
         let result = fcntl::fcntl(
             self.manager.file.as_raw_fd(),
-            FcntlArg::F_SETLK(&fid_flock(libc::F_WRLCK, self.fid)),
+            FcntlArg::F_SETLK(&fid_flock(libc::F_WRLCK as c_short, self.fid)?),
         );
         match result {
             Ok(_) => {
@@ -1265,23 +1266,23 @@ impl Lock {
         self.check()?;
         assert!(!self.owned);
         let fcntl_type = match lock_type {
-            LockType::Exclusive => libc::F_WRLCK,
-            LockType::Shared => libc::F_RDLCK,
+            LockType::Exclusive => libc::F_WRLCK as c_short,
+            LockType::Shared => libc::F_RDLCK as c_short,
         };
         fcntl::fcntl(
             self.manager.file.as_raw_fd(),
-            FcntlArg::F_SETLKW(&fid_flock(fcntl_type, self.fid)),
+            FcntlArg::F_SETLKW(&fid_flock(fcntl_type, self.fid)?),
         )?;
         self.owned = true;
         Ok(())
     }
 
     /// Release the lock, which we must currently own.
-    pub fn unlock(&mut self) -> nix::Result<()> {
+    pub fn unlock(&mut self) -> Result<(), Error> {
         assert!(self.owned, "can't unlock {} - we don't own it", self.fid);
         fcntl::fcntl(
             self.manager.file.as_raw_fd(),
-            FcntlArg::F_SETLK(&fid_flock(libc::F_UNLCK, self.fid)),
+            FcntlArg::F_SETLK(&fid_flock(libc::F_UNLCK as c_short, self.fid)?),
         )?;
         self.owned = false;
         Ok(())
@@ -1300,14 +1301,15 @@ impl Drop for Lock {
     }
 }
 
-fn fid_flock(typ: c_int, fid: i32) -> flock {
-    flock {
-        l_type: typ as c_short,
+fn fid_flock(typ: c_short, fid: i64) -> Result<flock, TryFromIntError> {
+    use std::convert::TryFrom;
+    Ok(flock {
+        l_type: typ,
         l_whence: libc::SEEK_SET as c_short,
-        l_start: fid as off_t,
+        l_start: off_t::try_from(fid)?,
         l_len: 1,
         l_pid: 0,
-    }
+    })
 }
 
 /// Given a relative or absolute path `t`, express it relative to `base`.

@@ -136,7 +136,6 @@ impl LogState {
         show_status: bool,
         t: &str,
     ) -> Result<i64, Error> {
-        use std::convert::{TryFrom, TryInto};
         use std::io::{BufRead, Write};
 
         let topdir = env::current_dir()?;
@@ -171,13 +170,12 @@ impl LogState {
                     }
                 };
                 let logname = redo::logname(ps.env(), fid);
-                let mut loglock = ps.new_lock(i32::try_from(fid)? + redo::LOG_LOCK_MAGIC);
+                let mut loglock = ps.new_lock(fid + redo::LOG_LOCK_MAGIC);
                 loglock.wait_lock(LockType::Shared)?;
                 (None, Some((fid, loglock, logname)))
             };
         let mut delay = Duration::from_millis(10);
-        let mut was_locked =
-            is_locked(ps, info.as_ref().and_then(|&(fid, ..)| fid.try_into().ok()))?;
+        let mut was_locked = is_locked(ps, info.as_ref().map(|&(fid, ..)| fid))?;
         let mut line_head = String::new();
         let mut width = tty_width();
         loop {
@@ -209,8 +207,7 @@ impl LogState {
                 break;
             }
             if line.is_empty() {
-                was_locked =
-                    is_locked(ps, info.as_ref().and_then(|&(fid, ..)| fid.try_into().ok()))?;
+                was_locked = is_locked(ps, info.as_ref().map(|&(fid, ..)| fid))?;
                 if matches.is_present("follow") {
                     // Don't display status line for extremely short-lived runs
                     if show_status
@@ -433,7 +430,7 @@ fn format_thousands(n: u64) -> String {
     .unwrap()
 }
 
-fn is_locked(ps: &ProcessState, fid: Option<i32>) -> Result<bool, Error> {
+fn is_locked(ps: &ProcessState, fid: Option<i64>) -> Result<bool, Error> {
     let fid = match fid {
         Some(fid) => fid,
         None => return Ok(false),

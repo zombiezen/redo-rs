@@ -669,7 +669,7 @@ where
                 ptx.set_drop_behavior(DropBehavior::Commit);
                 state::File::from_name(&mut ptx, &me, true).context(BuildErrorKind::Generic)?
             };
-            let selflock = ps.new_lock(state::LOG_LOCK_MAGIC + (myfile.id() as i32));
+            let selflock = ps.new_lock(state::LOG_LOCK_MAGIC + myfile.id());
             Some((me, myfile, selflock))
         } else {
             None
@@ -806,9 +806,7 @@ where
         }
         if let Some((fid, t)) = locked.pop_front() {
             // TODO(soon): check_sane
-            let mut lock = ps_ref
-                .borrow()
-                .new_lock(i32::try_from(fid).context(BuildErrorKind::Generic)?);
+            let mut lock = ps_ref.borrow().new_lock(fid);
             let mut backoff = Duration::from_millis(100);
             lock.try_lock().context(BuildErrorKind::Generic)?;
             while !lock.is_owned() {

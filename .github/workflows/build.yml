@@ -6,11 +6,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-18.04]
-        cargo_args: [""]
-        include:
-          - os: macos-latest
-            cargo_args: --features=debug-jobserver
+        os: [ubuntu-18.04, macos-latest]
     steps:
     - name: Check out code
       uses: actions/checkout@v2
@@ -18,4 +14,3 @@ jobs:
       uses: actions-rs/cargo@v1
       with:
         command: test
-        args: ${{ matrix.cargo_args }}

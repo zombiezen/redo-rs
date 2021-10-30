@@ -376,9 +376,16 @@ static DEPTH: AtomicUsize = AtomicUsize::new(0);
 
 /// Reduces the depth of subsequent entries written to the global logger by 2.
 /// It returns the previous depth value.
-#[inline]
 pub fn reduce_depth() -> usize {
-    DEPTH.fetch_sub(2, Ordering::SeqCst)
+    let mut old = DEPTH.load(Ordering::SeqCst);
+    loop {
+        // Avoid wrapping.
+        let new = if old > 2 { old - 2 } else { 0 };
+        match DEPTH.compare_exchange(old, new, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return old,
+            Err(curr) => old = curr,
+        }
+    }
 }
 
 /// Sets the depth of subsequent entries written to the global logger.

@@ -567,10 +567,12 @@ impl BuildJob<'_> {
             } else {
                 // no output generated at all; that's ok
 
-                // TODO(maybe): Remove EISDIR exception or remove directory?
+                // TODO(maybe): Remove EISDIR/EPERM exception or remove directory?
                 // Needed for makedir2 test. :(
                 match helpers::unlink(t) {
-                    Ok(_) | Err(nix::Error::Sys(Errno::EISDIR)) => {}
+                    Ok(_)
+                    | Err(nix::Error::Sys(Errno::EISDIR))
+                    | Err(nix::Error::Sys(Errno::EPERM)) => {}
                     e @ Err(_) => e.expect("failed to remove target file"),
                 }
             }

@@ -161,6 +161,7 @@ struct JobState {
 pub struct JobServer {
     params: Rc<ServerParams>,
     state: Rc<RefCell<ServerState>>,
+    dropped: bool,
 }
 
 impl JobServer {
@@ -257,6 +258,7 @@ impl JobServer {
                     top_level: 0,
                 }),
                 state: Rc::new(RefCell::new(ServerState::default())),
+                dropped: false,
             }),
             None => {
                 let token_fds = make_pipe(100)?;
@@ -272,6 +274,7 @@ impl JobServer {
                         top_level: realmax,
                     }),
                     state,
+                    dropped: false,
                 };
                 env::set_var(
                     MAKEFLAGS_VAR,
@@ -433,7 +436,13 @@ impl JobServer {
     }
 
     /// Release or destroy all the tokens we own, in preparation for exit.
-    pub fn force_return_tokens(&mut self) -> Result<(), Error> {
+    #[inline]
+    pub fn force_return_tokens(mut self) -> Result<(), Error> {
+        self.do_force_return_tokens()
+    }
+
+    fn do_force_return_tokens(&mut self) -> Result<(), Error> {
+        self.dropped = true;
         let mut state = self.state.borrow_mut();
         let n = state.wait_fds.len();
         debug_jobserver!(
@@ -475,7 +484,9 @@ impl JobServer {
 
 impl Drop for JobServer {
     fn drop(&mut self) {
-        let _ = self.force_return_tokens();
+        if !self.dropped {
+            let _ = self.do_force_return_tokens();
+        }
     }
 }
 
@@ -823,6 +834,35 @@ pub(crate) struct AllJobsDone {
     state: Rc<RefCell<ServerState>>,
 }
 
+impl AllJobsDone {
+    /// Ensure that the sum of the tokens and cheat tokens equals the number of
+    /// tokens granted at top level.
+    fn test_tokens(&mut self) -> Result<(), Error> {
+        assert_ne!(self.params.top_level, 0);
+        if self.state.borrow().my_tokens >= 1 {
+            self.state
+                .borrow_mut()
+                .release_mine(self.params.token_fds)?;
+        }
+        let mut tokens_buf = [0u8; 8192];
+        let tokens = try_read(self.params.token_fds.0, &mut tokens_buf)?.unwrap_or(0);
+        let mut cheats_buf = [0u8; 8192];
+        let cheats = try_read(self.params.cheat_fds.0, &mut cheats_buf)?.unwrap_or(0);
+        debug_jobserver!("toplevel: GOT {} tokens and {} cheats", tokens, cheats);
+        if (tokens - cheats) as i32 != self.params.top_level {
+            return Err(format_err!(
+                "on exit: expected {} tokens; found {}-{}",
+                self.params.top_level,
+                tokens,
+                cheats
+            ));
+        }
+        // TODO(someday): Retry if interrupted or short write.
+        unistd::write(self.params.token_fds.1, &tokens_buf[..tokens])?;
+        Ok(())
+    }
+}
+
 impl Future for AllJobsDone {
     type Output = Result<(), Error>;
 
@@ -849,40 +889,8 @@ impl Future for AllJobsDone {
                 // If we're the toplevel and we're sure no child processes remain,
                 // then we know we're totally idle.  Self-test to ensure no tokens
                 // mysteriously got created/destroyed.
-                if self.state.borrow().my_tokens >= 1 {
-                    let res = self.state.borrow_mut().release_mine(self.params.token_fds);
-                    if let Err(e) = res {
-                        return Poll::Ready(Err(e.into()));
-                    }
-                }
-                let mut tokens_buf = [0u8; 8192];
-                let tokens = match try_read(self.params.token_fds.0, &mut tokens_buf) {
-                    Ok(None) => 0,
-                    Ok(Some(n)) => n,
-                    Err(e) => {
-                        return Poll::Ready(Err(e.into()));
-                    }
-                };
-                let mut cheats_buf = [0u8; 8192];
-                let cheats = match try_read(self.params.cheat_fds.0, &mut cheats_buf) {
-                    Ok(None) => 0,
-                    Ok(Some(n)) => n,
-                    Err(e) => {
-                        return Poll::Ready(Err(e.into()));
-                    }
-                };
-                debug_jobserver!("toplevel: GOT {} tokens and {} cheats", tokens, cheats);
-                if (tokens - cheats) as i32 != self.params.top_level {
-                    return Poll::Ready(Err(format_err!(
-                        "on exit: expected {} tokens; found {}-{}",
-                        self.params.top_level,
-                        tokens,
-                        cheats
-                    )));
-                }
-                // TODO(someday): Retry if interrupted or short write.
-                if let Err(e) = unistd::write(self.params.token_fds.1, &tokens_buf[..tokens]) {
-                    return Poll::Ready(Err(e.into()));
+                if let Err(e) = self.test_tokens() {
+                    return Poll::Ready(Err(e));
                 }
             }
             // note: when we return, we may have *no* tokens, not even our own!

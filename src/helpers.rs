@@ -676,7 +676,7 @@ pub(crate) fn set_interval_timer(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 extern "C" {
     fn setitimer(which: c_int, new_value: *const itimerval, old_value: *mut itimerval) -> c_int;
 }

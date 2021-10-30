@@ -339,15 +339,20 @@ fn connect<P: AsRef<Path>>(env: &Env, dbfile: P) -> rusqlite::Result<Connection>
     // mode PERSIST.  But WAL fails on Windows WSL due to WSL's totally broken
     // locking.  On WSL, at least PERSIST works in single-threaded mode, so
     // if we're careful we can use it, more or less.
-    db.query_row(
+    let journal_mode = db.query_row(
         if env.locks_broken() {
             "pragma journal_mode = PERSIST"
         } else {
             "pragma journal_mode = WAL"
         },
         NO_PARAMS,
-        |_| Ok(()),
+        |row| -> rusqlite::Result<String> { row.get(0) },
     )?;
+    if env.locks_broken() {
+        assert_eq!(&journal_mode, "persist");
+    } else {
+        assert_eq!(&journal_mode, "wal");
+    }
     Ok(db)
 }
 

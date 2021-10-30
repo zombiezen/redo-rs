@@ -27,6 +27,7 @@ fn integration_test() {
         .arg(Path::new("redo").join("py"))
         .arg(Path::new("redo").join("sh"))
         .arg(Path::new("redo").join("whichpython"))
+        .env("RUST_BACKTRACE", "1")
         .spawn()
         .expect("could not build prereqs")
         .wait()
@@ -35,6 +36,7 @@ fn integration_test() {
 
     let status = Command::new(redo_path)
         .current_dir(crate_dir.join("t"))
+        .env("RUST_BACKTRACE", "1")
         .spawn()
         .expect("could not start integration test")
         .wait()

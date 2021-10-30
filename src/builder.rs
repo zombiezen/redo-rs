@@ -649,7 +649,7 @@ where
     use futures::future::FutureExt;
     use futures::stream::StreamExt;
     use rand::seq::SliceRandom;
-    use std::convert::{TryFrom, TryInto};
+    use std::convert::TryInto;
     use std::iter::FromIterator;
 
     let mut target_order = Vec::from_iter(0..targets.len());

@@ -24,7 +24,7 @@ use std::fmt::{self, Display, Formatter};
 use std::io::{self, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -90,7 +90,7 @@ impl<W> PrettyLog<W> {
         } else {
             buf.extend(b"redo  ");
         }
-        buf.extend(&self.config.depth);
+        buf.extend((0..DEPTH.load(Ordering::SeqCst)).map(|_| b' '));
         if !color.is_empty() {
             buf.extend(self.escapes.bold);
         }
@@ -231,7 +231,6 @@ impl<W: Write> Logger for PrettyLog<W> {
 
 #[derive(Clone, Debug, Default)]
 struct PrettyLogConfig {
-    depth: Vec<u8>,
     debug: i32,
     debug_locks: bool,
     debug_pids: bool,
@@ -243,7 +242,6 @@ struct PrettyLogConfig {
 impl From<&Env> for PrettyLogConfig {
     fn from(e: &Env) -> PrettyLogConfig {
         PrettyLogConfig {
-            depth: e.depth().as_bytes().into(),
             debug: e.debug,
             debug_locks: e.debug_locks(),
             debug_pids: e.debug_pids(),
@@ -324,6 +322,7 @@ impl LogBuilder {
         };
 
         DEBUG_LEVEL.store(env.debug, Ordering::SeqCst);
+        set_depth(env.depth().len());
         {
             let mut global_logger = GLOBAL_LOGGER.lock().unwrap();
             *global_logger = Some(logger);
@@ -371,6 +370,21 @@ static DEBUG_LEVEL: AtomicI32 = AtomicI32::new(3);
 #[inline]
 pub fn debug_level() -> i32 {
     DEBUG_LEVEL.load(Ordering::SeqCst)
+}
+
+static DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+/// Reduces the depth of subsequent entries written to the global logger by 2.
+/// It returns the previous depth value.
+#[inline]
+pub fn reduce_depth() -> usize {
+    DEPTH.fetch_sub(2, Ordering::SeqCst)
+}
+
+/// Sets the depth of subsequent entries written to the global logger.
+#[inline]
+pub fn set_depth(depth: usize) {
+    DEPTH.store(depth, Ordering::SeqCst);
 }
 
 /// Write a line to the process-wide logger.

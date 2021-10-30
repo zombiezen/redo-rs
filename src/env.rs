@@ -273,18 +273,6 @@ impl Env {
         &self.depth
     }
 
-    /// Set the log depth to `n` spaces.
-    #[inline]
-    pub fn set_depth(&mut self, n: usize) {
-        if n < self.depth.len() {
-            self.depth.truncate(n);
-            return;
-        }
-        while n > self.depth.len() {
-            self.depth.push(' ');
-        }
-    }
-
     /// Whether to print messages about file locking (useful for debugging).
     #[inline]
     pub fn debug_locks(&self) -> bool {

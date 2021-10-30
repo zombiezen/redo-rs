@@ -147,7 +147,7 @@ impl LogState {
         if t != "-" {
             self.depth.push(t.to_string());
         }
-        self.fix_depth(ps);
+        self.fix_depth();
         let mydir = Path::new(t).parent().unwrap_or_else(|| Path::new(""));
         let stdin = io::stdin();
         let (mut f, mut info): (Option<Box<dyn BufRead>>, Option<(i64, Lock, PathBuf)>) =
@@ -363,10 +363,9 @@ impl LogState {
                 Err(_) => {
                     if auto_bool_arg(&matches, "details").unwrap_or(true) {
                         if interrupted != 0 {
-                            let d = ps.env().depth().len();
-                            ps.env_mut().set_depth(d - 2);
+                            let d = logs::reduce_depth();
                             logs::meta("resumed", t, None);
-                            ps.env_mut().set_depth(d);
+                            logs::set_depth(d);
                             interrupted = 0;
                         }
                         logs::write(line.trim_end());
@@ -389,12 +388,12 @@ impl LogState {
             let last = self.depth.pop();
             assert_eq!(last.as_ref().map(|s| -> &str { &*s }), Some(t));
         }
-        self.fix_depth(ps);
+        self.fix_depth();
         Ok(lines_written)
     }
 
-    fn fix_depth(&self, ps: &mut ProcessState) {
-        ps.env_mut().set_depth(self.depth.len() * 2);
+    fn fix_depth(&self) {
+        logs::set_depth(self.depth.len() * 2);
     }
 }
 

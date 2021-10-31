@@ -1,0 +1,28 @@
+name: Release
+on:
+  release:
+    types: [published]
+jobs:
+  binaries:
+    name: Binaries
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-18.04, macos-latest]
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v2
+    - name: Set up Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+    - name: Build
+      id: build
+      run: |
+        minimal/do release
+        echo "::set-output name=file::$( ./release-name.sh )"
+    - name: Upload to GitHub
+      uses: softprops/action-gh-release@v1
+      with:
+        files: ${{ steps.build.outputs.file }}
+

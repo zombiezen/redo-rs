@@ -17,4 +17,5 @@
 # Minimal do script files
 .do_built
 .do_built.dir/
-**/*.did.tmp
+*.did
+/minimal/y

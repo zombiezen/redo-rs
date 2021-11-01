@@ -165,13 +165,14 @@ pub struct JobServer {
 }
 
 impl JobServer {
-    pub fn setup(max_jobs: i32) -> Result<JobServer, Error> {
-        const CHEATFDS_VAR: &str = "REDO_CHEATFDS";
-        const MAKEFLAGS_VAR: &str = "MAKEFLAGS";
+    const CHEATFDS_VAR: &'static str = "REDO_CHEATFDS";
+    const MAKEFLAGS_VAR: &'static str = "MAKEFLAGS";
 
+    pub fn setup(max_jobs: i32) -> Result<JobServer, Error> {
         assert!(max_jobs >= 0);
         debug_jobserver!("setup({})", max_jobs);
-        let token_fds = match parse_makeflags(env::var_os(MAKEFLAGS_VAR).unwrap_or_default())? {
+        let makeflags = parse_makeflags(env::var_os(JobServer::MAKEFLAGS_VAR).unwrap_or_default())?;
+        let token_fds = match makeflags {
             Some((a, b)) => {
                 if !helpers::fd_exists(a) || !helpers::fd_exists(b) {
                     log_err!("broken --jobserver-auth from parent process:\n");
@@ -208,7 +209,7 @@ impl JobServer {
             None => None,
         };
         let cheats = if max_jobs == 0 {
-            match env::var(CHEATFDS_VAR) {
+            match env::var(JobServer::CHEATFDS_VAR) {
                 Ok(v) => v,
                 Err(VarError::NotPresent) => String::new(),
                 Err(e) => return Err(e.into()),
@@ -236,7 +237,13 @@ impl JobServer {
                             None
                         }
                     }
-                    _ => return Err(format_err!("invalid REDO_CHEATFDS: {:?}", cheats)),
+                    _ => {
+                        return Err(format_err!(
+                            "invalid {}: {:?}",
+                            JobServer::CHEATFDS_VAR,
+                            cheats
+                        ))
+                    }
                 }
             } else {
                 None
@@ -245,7 +252,7 @@ impl JobServer {
                 Some(cheat_fds) => cheat_fds,
                 None => {
                     let (a, b) = make_pipe(102)?;
-                    env::set_var(CHEATFDS_VAR, format!("{},{}", a, b));
+                    env::set_var(JobServer::CHEATFDS_VAR, format!("{},{}", a, b));
                     (a, b)
                 }
             }
@@ -277,7 +284,7 @@ impl JobServer {
                     dropped: false,
                 };
                 env::set_var(
-                    MAKEFLAGS_VAR,
+                    JobServer::MAKEFLAGS_VAR,
                     format!(
                         " -j --jobserver-auth={0},{1} --jobserver-fds={0},{1}",
                         token_fds.0, token_fds.1
@@ -1112,10 +1119,11 @@ fn parse_makeflags<S: AsRef<OsStr>>(flags: S) -> Result<Option<(RawFd, RawFd)>, 
 mod tests {
     use super::*;
 
-    // TODO(soon): Set/unset MAKEFLAGS during tests
-
     #[test]
     fn start_job() {
+        let _var1 = remove_var_for_test(OsString::from(JobServer::MAKEFLAGS_VAR));
+        let _var2 = remove_var_for_test(OsString::from(JobServer::CHEATFDS_VAR));
+
         let mut server = JobServer::setup(1).unwrap();
         let job = server.handle().start("foo".into(), || 4).unwrap();
         let rv = server
@@ -1126,6 +1134,9 @@ mod tests {
 
     #[test]
     fn sleep() {
+        let _var1 = remove_var_for_test(OsString::from(JobServer::MAKEFLAGS_VAR));
+        let _var2 = remove_var_for_test(OsString::from(JobServer::CHEATFDS_VAR));
+
         let mut server = JobServer::setup(1).unwrap();
         let start = Instant::now();
         const SLEEP_DURATION: Duration = Duration::from_millis(100);
@@ -1144,6 +1155,10 @@ mod tests {
     #[test]
     fn sleep_concurrently_with_job() {
         use futures::future;
+
+        let _var1 = remove_var_for_test(OsString::from(JobServer::MAKEFLAGS_VAR));
+        let _var2 = remove_var_for_test(OsString::from(JobServer::CHEATFDS_VAR));
+
         let mut server = JobServer::setup(1).unwrap();
         let start = Instant::now();
         const SLEEP_DURATION: Duration = Duration::from_millis(100);
@@ -1186,5 +1201,26 @@ mod tests {
             parse_makeflags(" -j --jobserver-auth=1,2 --jobserver-fds=3,4").unwrap(),
             Some((1, 2)),
         );
+    }
+
+    #[derive(Debug)]
+    struct RestoreVar {
+        key: OsString,
+        val: Option<OsString>,
+    }
+
+    fn remove_var_for_test(key: OsString) -> RestoreVar {
+        let val = env::var_os(&key);
+        env::remove_var(&key);
+        RestoreVar { key, val }
+    }
+
+    impl Drop for RestoreVar {
+        fn drop(&mut self) {
+            match &self.val {
+                Some(v) => env::set_var(&self.key, v),
+                None => env::remove_var(&self.key),
+            }
+        }
     }
 }

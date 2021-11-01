@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::env;
 use std::path::Path;
 use std::process::Command;
 
@@ -22,7 +23,7 @@ fn integration_test() {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let redo_path = Path::new(env!("CARGO_BIN_EXE_redo"));
 
-    let status = Command::new(redo_path)
+    let status = clear_redo_env(&mut Command::new(redo_path))
         .current_dir(crate_dir)
         .arg(Path::new("redo").join("py"))
         .arg(Path::new("redo").join("sh"))
@@ -34,7 +35,7 @@ fn integration_test() {
         .expect("could not get exit status");
     assert!(status.success(), "prereq build status = {:?}", status);
 
-    let status = Command::new(redo_path)
+    let status = clear_redo_env(&mut Command::new(redo_path))
         .current_dir(crate_dir.join("t"))
         .env("RUST_BACKTRACE", "1")
         .spawn()
@@ -42,4 +43,16 @@ fn integration_test() {
         .wait()
         .expect("could not get exit status");
     assert!(status.success(), "integration test status = {:?}", status);
+}
+
+fn clear_redo_env(cmd: &mut Command) -> &mut Command {
+    for (k, _) in env::vars_os() {
+        if k.to_str()
+            .map(|k| k.starts_with("REDO_") || k == "REDO" || k == "MAKEFLAGS")
+            .unwrap_or(false)
+        {
+            cmd.env_remove(k);
+        }
+    }
+    cmd
 }

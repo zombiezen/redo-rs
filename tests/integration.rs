@@ -48,7 +48,7 @@ fn integration_test() {
 fn clear_redo_env(cmd: &mut Command) -> &mut Command {
     for (k, _) in env::vars_os() {
         if k.to_str()
-            .map(|k| k.starts_with("REDO_") || k == "REDO" || k == "MAKEFLAGS")
+            .map(|k| k.starts_with("REDO_") || k == "REDO" || k == "MAKEFLAGS" || k == "DO_BUILT")
             .unwrap_or(false)
         {
             cmd.env_remove(k);

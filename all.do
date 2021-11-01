@@ -1,3 +1,2 @@
 # shellcheck shell=sh
-redo-ifchange \
-  bin/all
+redo-ifchange debug test

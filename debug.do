@@ -5,4 +5,4 @@ redo-ifchange \
   Cargo.toml \
   src/*.rs \
   src/bin/redo/*.rs
-cargo check
+cargo build

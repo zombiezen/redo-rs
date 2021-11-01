@@ -26,7 +26,7 @@ mod targets;
 mod unlocked;
 mod whichdo;
 
-use clap::{App, AppSettings, Arg};
+use clap::{crate_version, App, AppSettings, Arg};
 use failure::{format_err, Error};
 use rusqlite::TransactionBehavior;
 use std::env;
@@ -129,6 +129,7 @@ pub(crate) fn log_flags() -> Vec<clap::Arg<'static, 'static>> {
 fn run_redo() -> Result<(), Error> {
     let matches = App::new("redo")
         .about("Build the listed targets whether they need it or not.")
+        .version(crate_version!())
         .setting(AppSettings::DeriveDisplayOrder)
         .setting(AppSettings::UnifiedHelpMessage)
         .arg(Arg::from_usage(

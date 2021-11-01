@@ -15,7 +15,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use clap::{App, Arg, ArgMatches};
+use clap::{crate_version, App, Arg, ArgMatches};
 use failure::{format_err, Error};
 use nix::unistd::{self, Pid};
 use rusqlite::TransactionBehavior;
@@ -44,6 +44,7 @@ pub(crate) fn run() -> Result<(), Error> {
     let mut ls = LogState::new();
     let matches = App::new("redo-log")
         .about("Print past build logs.")
+        .version(crate_version!())
         .arg(Arg::from_usage(
             "-r, --recursive 'show build logs for dependencies too'",
         ))

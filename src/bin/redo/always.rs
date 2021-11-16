@@ -32,7 +32,7 @@ pub(crate) fn run() -> Result<(), Error> {
     me.push(env.pwd());
     me.push(env.target());
     let mut ps = ProcessState::init(env)?;
-    let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Deferred)?;
+    let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Immediate)?;
     let mut f = redo::File::from_name(&mut ptx, &me, true)?;
     f.add_dep(&mut ptx, DepMode::Modified, redo::always_filename())?;
     let mut always = redo::File::from_name(&mut ptx, redo::always_filename(), true)?;

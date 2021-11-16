@@ -246,7 +246,7 @@ fn run_redo() -> Result<(), Error> {
     }
 
     {
-        let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Deferred)?;
+        let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Immediate)?;
         for t in &targets {
             if Path::new(t).exists() {
                 let f = redo::File::from_name(&mut ptx, t, true)?;

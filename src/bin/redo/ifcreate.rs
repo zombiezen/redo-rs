@@ -34,7 +34,7 @@ pub(crate) fn run() -> Result<(), Error> {
     me.push(env.pwd());
     me.push(env.target());
     let mut ps = ProcessState::init(env)?;
-    let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Deferred)?;
+    let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Immediate)?;
     let mut f = redo::File::from_name(&mut ptx, &me, true)?;
     for t in std::env::args_os().skip(1) {
         if t.is_empty() {

@@ -52,7 +52,7 @@ pub(crate) fn run() -> Result<(), Error> {
 
     let mut server;
     {
-        let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Deferred)?;
+        let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Immediate)?;
         let f = if !ptx.state().env().target().as_os_str().is_empty()
             && !ptx.state().env().is_unlocked()
         {

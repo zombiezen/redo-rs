@@ -386,7 +386,7 @@ impl BuildJob<'_> {
             let _lock = lock; // ensure we hold the lock until after state has been recorded
             let mut rv = job.await;
             let mut ps = ps_ref.borrow_mut();
-            let mut ptx = match ProcessTransaction::new(*ps, TransactionBehavior::Deferred) {
+            let mut ptx = match ProcessTransaction::new(*ps, TransactionBehavior::Immediate) {
                 Ok(ptx) => ptx,
                 Err(_) => return BuildJob::INTERNAL_ERROR_EXIT,
             };
@@ -666,7 +666,7 @@ where
             me.push(&ps.env().pwd);
             me.push(ps.env().target());
             let myfile = {
-                let mut ptx = ProcessTransaction::new(ps, TransactionBehavior::Deferred)
+                let mut ptx = ProcessTransaction::new(ps, TransactionBehavior::Immediate)
                     .context(BuildErrorKind::Generic)?;
                 ptx.set_drop_behavior(DropBehavior::Commit);
                 state::File::from_name(&mut ptx, &me, true).context(BuildErrorKind::Generic)?
@@ -733,7 +733,7 @@ where
             // TODO(soon): state.check_sane.
             {
                 let mut ps = ps_ref.borrow_mut();
-                let mut ptx = ProcessTransaction::new(*ps, TransactionBehavior::Deferred)
+                let mut ptx = ProcessTransaction::new(*ps, TransactionBehavior::Immediate)
                     .context(BuildErrorKind::Generic)?;
                 ptx.set_drop_behavior(DropBehavior::Commit);
                 let mut f =
@@ -856,7 +856,7 @@ where
             );
             {
                 let mut ps = ps_ref.borrow_mut();
-                let mut ptx = ProcessTransaction::new(*ps, TransactionBehavior::Deferred)
+                let mut ptx = ProcessTransaction::new(*ps, TransactionBehavior::Immediate)
                     .context(BuildErrorKind::Generic)?;
                 ptx.set_drop_behavior(DropBehavior::Commit);
                 let file =

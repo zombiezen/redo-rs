@@ -16,7 +16,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use common_path;
-use failure::{format_err, Error};
 use std::borrow::Cow;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -29,6 +28,7 @@ use std::rc::Rc;
 use std::str::FromStr;
 use tempfile::{self, TempDir};
 
+use super::error::{RedoError, RedoErrorKind};
 use super::helpers::{self, RedoPath, RedoPathBuf};
 
 #[derive(Clone, Debug)]
@@ -61,13 +61,16 @@ pub struct Env {
 
 impl Env {
     /// Start a session (if needed) for a command that does need the state db.
-    pub fn init<T: AsRef<str>>(targets: &[T]) -> Result<Env, Error> {
+    pub fn init<P: AsRef<RedoPath>>(targets: &[P]) -> Result<Env, RedoError> {
         let mut is_toplevel = false;
         let mut redo_links_dir = None;
         if !get_bool("REDO") {
             is_toplevel = true;
-            let exe_path = env::current_exe()?;
-            let exe_names = [&exe_path, &fs::canonicalize(&exe_path)?];
+            let exe_path = env::current_exe().map_err(RedoError::wrap_generic)?;
+            let exe_names = [
+                &exe_path,
+                &fs::canonicalize(&exe_path).map_err(RedoError::wrap_generic)?,
+            ];
             let dir_names: Vec<&Path> = exe_names.iter().filter_map(|&p| p.parent()).collect();
             let mut try_names: Vec<Cow<Path>> = Vec::new();
             try_names.extend(dir_names.iter().map(|&p| {
@@ -108,23 +111,23 @@ impl Env {
             env::set_var("REDO", exe_path);
         }
         if !get_bool("REDO_BASE") {
-            let targets: Vec<&str> = if targets.is_empty() {
+            let targets: Vec<&RedoPath> = if targets.is_empty() {
                 // If no other targets given, assume the current directory.
-                vec!["all"]
+                vec![unsafe { RedoPath::from_str_unchecked("all") }]
             } else {
                 targets.iter().map(AsRef::as_ref).collect()
             };
-            let cwd = env::current_dir()?;
-            let dirs: Vec<PathBuf> = targets
-                .iter()
-                .filter_map(|t| {
-                    Path::new(t)
-                        .parent()
-                        .map(|par| helpers::abs_path(&cwd, &par).into_owned())
-                })
-                .collect();
-            if dirs.len() != targets.len() {
-                return Err(format_err!("invalid targets"));
+            let cwd = env::current_dir().map_err(RedoError::wrap_generic)?;
+            let mut dirs: Vec<PathBuf> = Vec::with_capacity(targets.len());
+            for t in targets.iter() {
+                match t.as_path().parent() {
+                    Some(par) => dirs.push(helpers::abs_path(&cwd, &par).into_owned()),
+                    None => {
+                        return Err(
+                            RedoErrorKind::InvalidTarget(t.as_os_str().to_os_string()).into()
+                        )
+                    }
+                }
             }
             let orig_base = common_path::common_path_all(
                 dirs.iter()
@@ -158,8 +161,8 @@ impl Env {
         })
     }
 
-    fn make_redo_links_dir(exe_path: &Path) -> Result<TempDir, Error> {
-        let d = tempfile::tempdir()?;
+    fn make_redo_links_dir(exe_path: &Path) -> Result<TempDir, RedoError> {
+        let d = tempfile::tempdir().map_err(RedoError::wrap_generic)?;
         const BINARIES: &[&str] = &[
             "redo",
             "redo-always",
@@ -176,14 +179,14 @@ impl Env {
         let mut path = d.path().to_path_buf();
         for name in BINARIES {
             path.push(name);
-            unixfs::symlink(exe_path, &path)?;
+            unixfs::symlink(exe_path, &path).map_err(RedoError::wrap_generic)?;
             path.pop();
         }
         Ok(d)
     }
 
     /// Start a session (if needed) for a command that needs no state db.
-    pub fn init_no_state() -> Result<Env, Error> {
+    pub fn init_no_state() -> Result<Env, RedoError> {
         let mut is_toplevel = false;
         if !get_bool("REDO") {
             env::set_var("REDO", "NOT_DEFINED");
@@ -199,17 +202,22 @@ impl Env {
     }
 
     /// Read environment (which must already be set) to get runtime settings.
-    pub fn inherit() -> Result<Env, Error> {
-        use std::convert::TryInto;
+    pub fn inherit() -> Result<Env, RedoError> {
+        use std::convert::TryFrom;
 
         if !get_bool("REDO") {
-            return Err(format_err!("must be run from inside a .do"));
+            return Err(RedoError::new(format!("must be run from inside a .do")));
         }
         let v = Env {
             is_toplevel: false,
             base: env::var_os("REDO_BASE").unwrap_or_default().into(),
             pwd: env::var_os("REDO_PWD").unwrap_or_default().into(),
-            target: env::var_os("REDO_TARGET").unwrap_or_default().try_into()?,
+            target: RedoPathBuf::try_from(env::var_os("REDO_TARGET").unwrap_or_default()).map_err(
+                |e| RedoError {
+                    kind: RedoErrorKind::InvalidTarget(e.input().to_os_string()),
+                    msg: format!("REDO_TARGET: {}", e),
+                },
+            )?,
             depth: env::var("REDO_DEPTH").unwrap_or_default(),
             debug: get_int("REDO_DEBUG", 0) as i32,
             debug_locks: get_bool("REDO_DEBUG_LOCKS"),
@@ -233,10 +241,10 @@ impl Env {
             redo_links_dir: None,
         };
         if v.depth.contains(|c| c != ' ') {
-            return Err(format_err!(
+            return Err(RedoError::new(format!(
                 "REDO_DEPTH={:?} contains non-space characters",
                 &v.depth
-            ));
+            )));
         }
         // not inheritable by subprocesses
         env::set_var("REDO_UNLOCKED", "");

@@ -114,6 +114,7 @@ pub mod builder;
 mod cycles;
 mod deps;
 mod env;
+mod error;
 mod helpers;
 mod jobserver;
 pub mod logs;
@@ -122,6 +123,7 @@ mod state;
 
 pub use deps::{is_dirty, Dirtiness, DirtyCallbacks, DirtyCallbacksBuilder};
 pub use env::{Env, OptionalBool};
+pub use error::{RedoError, RedoErrorKind};
 pub use helpers::{abs_path, normpath, RedoPath, RedoPathBuf};
 pub use jobserver::JobServer;
 pub use paths::{possible_do_files, DoFile, PossibleDoFiles};

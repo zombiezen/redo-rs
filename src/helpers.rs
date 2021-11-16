@@ -53,9 +53,7 @@ impl RedoPath {
         if RedoPath::validate(s) {
             Ok(unsafe { RedoPath::from_str_unchecked(s) })
         } else {
-            Err(RedoPathError {
-                input: RedoPathErrorInput::String(s.to_string()),
-            })
+            Err(RedoPathError { input: s.into() })
         }
     }
 
@@ -79,7 +77,7 @@ impl RedoPath {
         match s.to_str() {
             Some(s) => RedoPath::from_str(s),
             None => Err(RedoPathError {
-                input: RedoPathErrorInput::OsString(s.to_os_string()),
+                input: s.to_os_string(),
             }),
         }
     }
@@ -125,6 +123,12 @@ impl RedoPath {
     #[inline]
     pub fn to_redo_path_buf(&self) -> RedoPathBuf {
         let s = self.0.to_os_string();
+        unsafe { RedoPathBuf::from_os_string_unchecked(s) }
+    }
+
+    /// Creates an owned [`RedoPathBuf`] with `path` adjoined to `self`.
+    pub fn join<P: AsRef<RedoPath>>(&self, path: P) -> RedoPathBuf {
+        let s = self.as_path().join(path.as_ref()).into_os_string();
         unsafe { RedoPathBuf::from_os_string_unchecked(s) }
     }
 
@@ -331,9 +335,7 @@ impl TryFrom<String> for RedoPathBuf {
         if RedoPath::validate(&s) {
             Ok(unsafe { RedoPathBuf::from_string_unchecked(s) })
         } else {
-            Err(RedoPathError {
-                input: RedoPathErrorInput::String(s.to_string()),
-            })
+            Err(RedoPathError { input: s.into() })
         }
     }
 }
@@ -352,9 +354,7 @@ impl TryFrom<OsString> for RedoPathBuf {
     fn try_from(s: OsString) -> Result<RedoPathBuf, RedoPathError> {
         match s.into_string() {
             Ok(s) => RedoPathBuf::try_from(s),
-            Err(s) => Err(RedoPathError {
-                input: RedoPathErrorInput::OsString(s.to_os_string()),
-            }),
+            Err(input) => Err(RedoPathError { input }),
         }
     }
 }
@@ -518,26 +518,22 @@ impl NixPath for RedoPathBuf {
 
 #[derive(Clone, Debug)]
 pub struct RedoPathError {
-    input: RedoPathErrorInput,
+    input: OsString,
+}
+
+impl RedoPathError {
+    pub(crate) fn input(&self) -> &OsStr {
+        &self.input
+    }
 }
 
 impl Display for RedoPathError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let s: &dyn Debug = match &self.input {
-            RedoPathErrorInput::OsString(s) => s,
-            RedoPathErrorInput::String(s) => s,
-        };
-        write!(f, "could not use {:?} as redo path", s)
+        write!(f, "could not use {:?} as redo path", self.input())
     }
 }
 
 impl std::error::Error for RedoPathError {}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum RedoPathErrorInput {
-    OsString(OsString),
-    String(String),
-}
 
 pub(crate) fn close_on_exec(fd: RawFd, yes: bool) -> nix::Result<()> {
     let result = fcntl::fcntl(fd, FcntlArg::F_GETFD)?;

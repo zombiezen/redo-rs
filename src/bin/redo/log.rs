@@ -32,7 +32,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use redo::logs::{self, LogBuilder, Meta};
-use redo::{self, Env, Lock, LockType, ProcessState, ProcessTransaction};
+use redo::{self, Env, Lock, LockType, ProcessState, ProcessTransaction, RedoPath};
 
 use super::{auto_bool_arg, log_flags};
 
@@ -58,10 +58,13 @@ pub(crate) fn run() -> Result<(), Error> {
         .arg(Arg::from_usage("--ack-fd=[fd] 'print REDO-OK to this fd upon starting'").hidden(true))
         .arg(Arg::from_usage("<target>..."))
         .get_matches();
-    let targets: Vec<&str> = matches
-        .values_of("target")
-        .map(|v| v.collect())
-        .unwrap_or_default();
+    let targets = {
+        let mut targets = Vec::<&RedoPath>::new();
+        for arg in matches.values_of("target").unwrap_or_default() {
+            targets.push(RedoPath::from_str(arg)?);
+        }
+        targets
+    };
     if targets.is_empty() {
         eprintln!("redo-log give at least one target; maybe \"all\"?");
         process::exit(1);
@@ -92,10 +95,10 @@ pub(crate) fn run() -> Result<(), Error> {
             .write(b"REDO-OK\n")
             .context("failed write to --ack-fd")?;
     }
-    let mut queue: VecDeque<&str> = VecDeque::from(targets);
+    let mut queue: VecDeque<&RedoPath> = VecDeque::from(targets);
     let topdir = env::current_dir()?;
     while let Some(t) = queue.pop_front() {
-        if t != "-" {
+        if t.as_str() != "-" {
             logs::meta(
                 "do",
                 rel(&topdir, ".", t)?
@@ -135,7 +138,7 @@ impl LogState {
         ps: &mut ProcessState,
         matches: &ArgMatches,
         show_status: bool,
-        t: &str,
+        t: &RedoPath,
     ) -> Result<i64, Error> {
         use std::io::{BufRead, Write};
 
@@ -145,14 +148,14 @@ impl LogState {
         if !self.already.insert(t.to_string()) {
             return Ok(0);
         }
-        if t != "-" {
+        if t.as_str() != "-" {
             self.depth.push(t.to_string());
         }
         self.fix_depth();
-        let mydir = Path::new(t).parent().unwrap_or_else(|| Path::new(""));
+        let mydir = t.parent().unwrap_or_default();
         let stdin = io::stdin();
         let (mut f, mut info): (Option<Box<dyn BufRead>>, Option<(i64, Lock, PathBuf)>) =
-            if t == "-" {
+            if t.as_str() == "-" {
                 (Some(Box::new(stdin.lock())), None)
             } else {
                 let fid = {
@@ -276,7 +279,7 @@ impl LogState {
                         .into_os_string()
                         .into_string()
                         .expect("cannot format target as string");
-                    let fixname = redo::normpath(&mydir.join(g.text()))
+                    let fixname = redo::normpath(&mydir.as_path().join(g.text()))
                         .into_owned()
                         .into_os_string()
                         .into_string()
@@ -293,11 +296,7 @@ impl LogState {
                                     if let Some((_, loglock, _)) = info.as_mut() {
                                         loglock.unlock()?;
                                     }
-                                    let new_t = mydir
-                                        .join(g.text())
-                                        .into_os_string()
-                                        .into_string()
-                                        .expect("cannot format target as string");
+                                    let new_t = mydir.join(RedoPath::from_str(g.text())?);
                                     let got = self.catlog(ps, matches, show_status, &new_t)?;
                                     interrupted += got;
                                     lines_written += got;
@@ -324,11 +323,7 @@ impl LogState {
                                 if let Some((_, loglock, _)) = info.as_mut() {
                                     loglock.unlock()?;
                                 }
-                                let new_t = mydir
-                                    .join(g.text())
-                                    .into_os_string()
-                                    .into_string()
-                                    .expect("cannot format target as string");
+                                let new_t = mydir.join(RedoPath::from_str(g.text())?);
                                 let got = self.catlog(ps, matches, show_status, &new_t)?;
                                 interrupted += got;
                                 lines_written += got;
@@ -365,7 +360,7 @@ impl LogState {
                     if auto_bool_arg(&matches, "details").unwrap_or(true) {
                         if interrupted != 0 {
                             let d = logs::reduce_depth();
-                            logs::meta("resumed", t, None);
+                            logs::meta("resumed", t.as_str(), None);
                             logs::set_depth(d);
                             interrupted = 0;
                         }
@@ -385,9 +380,9 @@ impl LogState {
             // partial line never got terminated
             print!("{}", line_head);
         }
-        if t != "-" {
+        if t.as_str() != "-" {
             let last = self.depth.pop();
-            assert_eq!(last.as_ref().map(|s| -> &str { &*s }), Some(t));
+            assert_eq!(last.as_ref().map(|s| -> &str { &*s }), Some(t.as_str()));
         }
         self.fix_depth();
         Ok(lines_written)

@@ -23,14 +23,14 @@ use std::env;
 use std::io;
 
 use redo::logs::LogBuilder;
-use redo::{self, Env, Files, ProcessState, ProcessTransaction};
+use redo::{self, Env, Files, ProcessState, ProcessTransaction, RedoPath};
 
 pub(crate) fn run() -> Result<(), Error> {
     if env::args_os().len() != 1 {
         return Err(format_err!("no arguments expected."));
     }
 
-    let targets: &[&str] = &[];
+    let targets: &[&RedoPath] = &[];
     let env = Env::init(targets)?;
     LogBuilder::from(&env).setup(&env, io::stderr());
 

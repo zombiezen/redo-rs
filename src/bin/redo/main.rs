@@ -265,18 +265,23 @@ fn run_redo() -> Result<(), Error> {
     }
     let mut server = JobServer::setup(j)?;
     assert!(ps.is_flushed());
-    let build_result = server.block_on(builder::run(
-        &mut ps,
-        &mut server.handle(),
-        &targets,
-        |_, _| Ok((true, Dirtiness::Dirty)),
-    ));
+    let server_handle = server.handle();
+    let build_result = server.block_on(async {
+        use failure::Fail;
+        let result = builder::run(&mut ps, &server_handle, &targets, |_, _| {
+            Ok((true, Dirtiness::Dirty))
+        })
+        .await;
+        result.map_err(|e| e.compat())
+    });
     assert!(ps.is_flushed());
     let return_tokens_result = server.force_return_tokens();
     if let Err(e) = &return_tokens_result {
         log_err!("unexpected error: {}", e);
     }
-    build_result.map_err(|e| e.into()).and(return_tokens_result)
+    build_result
+        .map_err(|e| e.into())
+        .and(return_tokens_result.map_err(Into::into))
 }
 
 /// Converts an argument pair match of `name` and `"no-" + name` into a tri-state.

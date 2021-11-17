@@ -51,6 +51,7 @@ use std::time::{Duration, SystemTime};
 use super::builder::BuildError;
 use super::cycles;
 use super::env::Env;
+use super::error::RedoError;
 use super::exits::*;
 use super::helpers::{self, RedoPath, RedoPathBuf};
 
@@ -1250,12 +1251,16 @@ impl Lock {
     }
 
     /// Non-blocking try to acquire our lock; returns true if it worked.
-    pub fn try_lock(&mut self) -> Result<bool, Error> {
-        self.check()?;
+    pub fn try_lock(&mut self) -> Result<bool, RedoError> {
+        // TODO(soon): Don't make opaque.
+        self.check()
+            .map_err(|e| RedoError::opaque_error(e.compat()))?;
         assert!(!self.owned);
         let result = fcntl::fcntl(
             self.manager.file.as_raw_fd(),
-            FcntlArg::F_SETLK(&fid_flock(libc::F_WRLCK as c_short, self.fid)?),
+            FcntlArg::F_SETLK(
+                &fid_flock(libc::F_WRLCK as c_short, self.fid).map_err(RedoError::opaque_error)?,
+            ),
         );
         match result {
             Ok(_) => {
@@ -1263,13 +1268,15 @@ impl Lock {
                 Ok(true)
             }
             Err(nix::Error::Sys(Errno::EACCES)) | Err(nix::Error::Sys(Errno::EAGAIN)) => Ok(false),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(RedoError::opaque_error(e)),
         }
     }
 
     /// Try to acquire our lock, and wait if it's currently locked.
-    pub fn wait_lock(&mut self, lock_type: LockType) -> Result<(), Error> {
-        self.check()?;
+    pub fn wait_lock(&mut self, lock_type: LockType) -> Result<(), RedoError> {
+        // TODO(soon): Don't make opaque.
+        self.check()
+            .map_err(|e| RedoError::opaque_error(e.compat()))?;
         assert!(!self.owned);
         let fcntl_type = match lock_type {
             LockType::Exclusive => libc::F_WRLCK as c_short,
@@ -1277,19 +1284,23 @@ impl Lock {
         };
         fcntl::fcntl(
             self.manager.file.as_raw_fd(),
-            FcntlArg::F_SETLKW(&fid_flock(fcntl_type, self.fid)?),
-        )?;
+            FcntlArg::F_SETLKW(&fid_flock(fcntl_type, self.fid).map_err(RedoError::opaque_error)?),
+        )
+        .map_err(RedoError::opaque_error)?;
         self.owned = true;
         Ok(())
     }
 
     /// Release the lock, which we must currently own.
-    pub fn unlock(&mut self) -> Result<(), Error> {
+    pub fn unlock(&mut self) -> Result<(), RedoError> {
         assert!(self.owned, "can't unlock {} - we don't own it", self.fid);
         fcntl::fcntl(
             self.manager.file.as_raw_fd(),
-            FcntlArg::F_SETLK(&fid_flock(libc::F_UNLCK as c_short, self.fid)?),
-        )?;
+            FcntlArg::F_SETLK(
+                &fid_flock(libc::F_UNLCK as c_short, self.fid).map_err(RedoError::opaque_error)?,
+            ),
+        )
+        .map_err(RedoError::opaque_error)?;
         self.owned = false;
         Ok(())
     }

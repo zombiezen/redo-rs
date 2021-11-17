@@ -66,10 +66,10 @@ impl Env {
         let mut redo_links_dir = None;
         if !get_bool("REDO") {
             is_toplevel = true;
-            let exe_path = env::current_exe().map_err(RedoError::wrap_generic)?;
+            let exe_path = env::current_exe().map_err(RedoError::opaque_error)?;
             let exe_names = [
                 &exe_path,
-                &fs::canonicalize(&exe_path).map_err(RedoError::wrap_generic)?,
+                &fs::canonicalize(&exe_path).map_err(RedoError::opaque_error)?,
             ];
             let dir_names: Vec<&Path> = exe_names.iter().filter_map(|&p| p.parent()).collect();
             let mut try_names: Vec<Cow<Path>> = Vec::new();
@@ -117,7 +117,7 @@ impl Env {
             } else {
                 targets.iter().map(AsRef::as_ref).collect()
             };
-            let cwd = env::current_dir().map_err(RedoError::wrap_generic)?;
+            let cwd = env::current_dir().map_err(RedoError::opaque_error)?;
             let mut dirs: Vec<PathBuf> = Vec::with_capacity(targets.len());
             for t in targets.iter() {
                 match t.as_path().parent() {
@@ -162,7 +162,7 @@ impl Env {
     }
 
     fn make_redo_links_dir(exe_path: &Path) -> Result<TempDir, RedoError> {
-        let d = tempfile::tempdir().map_err(RedoError::wrap_generic)?;
+        let d = tempfile::tempdir().map_err(RedoError::opaque_error)?;
         const BINARIES: &[&str] = &[
             "redo",
             "redo-always",
@@ -179,7 +179,7 @@ impl Env {
         let mut path = d.path().to_path_buf();
         for name in BINARIES {
             path.push(name);
-            unixfs::symlink(exe_path, &path).map_err(RedoError::wrap_generic)?;
+            unixfs::symlink(exe_path, &path).map_err(RedoError::opaque_error)?;
             path.pop();
         }
         Ok(d)
@@ -213,9 +213,9 @@ impl Env {
             base: env::var_os("REDO_BASE").unwrap_or_default().into(),
             pwd: env::var_os("REDO_PWD").unwrap_or_default().into(),
             target: RedoPathBuf::try_from(env::var_os("REDO_TARGET").unwrap_or_default()).map_err(
-                |e| RedoError {
-                    kind: RedoErrorKind::InvalidTarget(e.input().to_os_string()),
-                    msg: format!("REDO_TARGET: {}", e),
+                |e| {
+                    RedoError::new(format!("REDO_TARGET: {}", e))
+                        .with_kind(RedoErrorKind::InvalidTarget(e.input().to_os_string()))
                 },
             )?,
             depth: env::var("REDO_DEPTH").unwrap_or_default(),

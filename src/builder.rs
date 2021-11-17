@@ -53,6 +53,7 @@ use zombiezen_const_cstr::const_cstr;
 use super::cycles;
 use super::deps::Dirtiness;
 use super::env::{Env, OptionalBool};
+use super::error::RedoError;
 use super::exits::*;
 use super::helpers::{self, OsBytes, RedoPath, RedoPathBuf};
 use super::jobserver::JobServerHandle;
@@ -678,7 +679,7 @@ where
 
     let result: Cell<Result<(), BuildError>> = Cell::new(Ok(()));
     let mut locked: VecDeque<(i64, &RedoPath)> = VecDeque::new();
-    let mut cheat = || -> Result<i32, Error> {
+    let mut cheat = || -> Result<i32, RedoError> {
         let selflock = match &mut me {
             Some((_, _, ref mut selflock)) => selflock,
             None => return Ok(0),

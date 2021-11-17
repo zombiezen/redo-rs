@@ -82,12 +82,12 @@ pub(crate) fn run() -> Result<(), Error> {
         }
     }
 
-    let build_result = server.block_on(builder::run(
-        &mut ps,
-        &mut server.handle(),
-        &targets,
-        should_build,
-    ));
+    let server_handle = server.handle();
+    let build_result = server.block_on(async {
+        use failure::Fail;
+        let result = builder::run(&mut ps, &server_handle, &targets, should_build).await;
+        result.map_err(|e| e.compat())
+    });
     // TODO(someday): In the original, there's a state.rollback call.
     // Unclear what this is trying to do.
     assert!(ps.is_flushed());
@@ -95,7 +95,9 @@ pub(crate) fn run() -> Result<(), Error> {
     if let Err(e) = &return_tokens_result {
         log_err!("unexpected error: {}", e);
     }
-    build_result.map_err(|e| e.into()).and(return_tokens_result)
+    build_result
+        .map_err(|e| e.into())
+        .and(return_tokens_result.map_err(Into::into))
 }
 
 fn should_build(ptx: &mut ProcessTransaction, t: &RedoPath) -> Result<(bool, Dirtiness), Error> {

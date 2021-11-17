@@ -89,7 +89,6 @@
 //! Sorry this is so complicated.  I couldn't think of a way to make it
 //! simpler :)
 
-use failure::{format_err, Error};
 use futures::future::FusedFuture;
 use futures::task;
 use futures::{pin_mut, select};
@@ -117,6 +116,7 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::error::RedoError;
 use super::exits::*;
 use super::helpers::{self, IntervalTimer, IntervalTimerValue};
 
@@ -169,7 +169,7 @@ impl JobServer {
     const CHEATFDS_VAR: &'static str = "REDO_CHEATFDS";
     const MAKEFLAGS_VAR: &'static str = "MAKEFLAGS";
 
-    pub fn setup(max_jobs: i32) -> Result<JobServer, Error> {
+    pub fn setup(max_jobs: i32) -> Result<JobServer, RedoError> {
         assert!(max_jobs >= 0);
         debug_jobserver!("setup({})", max_jobs);
         let makeflags = parse_makeflags(env::var_os(JobServer::MAKEFLAGS_VAR).unwrap_or_default())?;
@@ -182,7 +182,9 @@ impl JobServer {
                         "  otherwise, see https://redo.rtfd.io/en/latest/FAQParallel/#MAKEFLAGS\n"
                     );
                     // TODO(soon): ImmediateReturn(EXIT_INVALID_JOBSERVER)
-                    return Err(format_err!("broken --jobserver-auth from parent process"));
+                    return Err(RedoError::new(
+                        "broken --jobserver-auth from parent process",
+                    ));
                 }
                 match max_jobs {
                     0 => {
@@ -213,7 +215,7 @@ impl JobServer {
             match env::var(JobServer::CHEATFDS_VAR) {
                 Ok(v) => v,
                 Err(VarError::NotPresent) => String::new(),
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(RedoError::opaque_error(e)),
             }
         } else {
             String::new()
@@ -239,11 +241,11 @@ impl JobServer {
                         }
                     }
                     _ => {
-                        return Err(format_err!(
+                        return Err(RedoError::new(format!(
                             "invalid {}: {:?}",
                             JobServer::CHEATFDS_VAR,
                             cheats
-                        ))
+                        )))
                     }
                 }
             } else {
@@ -252,7 +254,7 @@ impl JobServer {
             match from_env {
                 Some(cheat_fds) => cheat_fds,
                 None => {
-                    let (a, b) = make_pipe(102)?;
+                    let (a, b) = make_pipe(102).map_err(RedoError::opaque_error)?;
                     env::set_var(JobServer::CHEATFDS_VAR, format!("{},{}", a, b));
                     (a, b)
                 }
@@ -269,11 +271,13 @@ impl JobServer {
                 dropped: false,
             }),
             None => {
-                let token_fds = make_pipe(100)?;
+                let token_fds = make_pipe(100).map_err(RedoError::opaque_error)?;
                 let realmax = if max_jobs == 0 { 1 } else { max_jobs };
                 let mut state = ServerState::default();
                 state.create_tokens(realmax - 1);
-                state.release_except_mine(token_fds)?;
+                state
+                    .release_except_mine(token_fds)
+                    .map_err(RedoError::opaque_error)?;
                 let state = Rc::new(RefCell::new(state));
                 let server = JobServer {
                     params: Rc::new(ServerParams {
@@ -305,9 +309,9 @@ impl JobServer {
     }
 
     /// Run all tasks in the job server to completion.
-    pub fn block_on<T, F, E>(&mut self, f: F) -> Result<T, Error>
+    pub fn block_on<T, F, E>(&mut self, f: F) -> Result<T, failure::Error>
     where
-        E: Into<Error>,
+        E: Into<failure::Error>,
         F: Future<Output = Result<T, E>>,
     {
         use std::iter::FromIterator;
@@ -361,7 +365,8 @@ impl JobServer {
                             thread::sleep(d);
                             continue;
                         }
-                        return Err(format_err!("JobServer deadlock"));
+                        // TODO(soon): Remove .into().
+                        return Err(RedoError::new("JobServer deadlock").into());
                     }
                     let mut max_delay: Option<TimeVal> =
                         next_timer_duration.map(|d| helpers::timeval_from_duration(d).into());
@@ -374,15 +379,21 @@ impl JobServer {
                         Vec::from_iter(state.token_wakers.iter().map(|&(id, _)| id)),
                         Vec::from_iter(rfds.fds(None))
                     );
-                    select::select(None, Some(&mut rfds), None, None, max_delay.as_mut())?;
+                    select::select(None, Some(&mut rfds), None, None, max_delay.as_mut())
+                        .map_err(RedoError::opaque_error)?;
                     debug_jobserver!("readable: {:?}", Vec::from_iter(rfds.fds(None)));
 
                     for fd in rfds.fds(None) {
                         if fd == self.params.token_fds.0 {
                             let mut b: [u8; 1] = [0];
-                            match try_read(self.params.token_fds.0, &mut b)? {
+                            let read_result = try_read(self.params.token_fds.0, &mut b)
+                                .map_err(RedoError::opaque_error)?;
+                            match read_result {
                                 Some(0) => {
-                                    return Err(format_err!("unexpected EOF on token read"));
+                                    // TODO(soon): Remove .into().
+                                    return Err(
+                                        RedoError::new("unexpected EOF on token read").into()
+                                    );
                                 }
                                 Some(1) => {
                                     state.my_tokens += 1;
@@ -414,20 +425,31 @@ impl JobServer {
                             Ok(None) | Ok(Some(0)) => {
                                 state.create_tokens(1);
                                 if state.has_token() {
-                                    state.release_except_mine(self.params.token_fds)?;
+                                    state
+                                        .release_except_mine(self.params.token_fds)
+                                        .map_err(RedoError::opaque_error)?;
                                 }
                             }
-                            Err(e) => return Err(e.into()),
+                            // TODO(soon): Remove .into().
+                            Err(e) => return Err(RedoError::opaque_error(e).into()),
                             Ok(Some(_)) => unreachable!("only 1 byte possible to read"),
                         }
-                        unistd::close(fd)?;
+                        unistd::close(fd).map_err(RedoError::opaque_error)?;
                         let pd = state.wait_fds.remove(&fd).unwrap();
-                        let rv = wait::waitpid(Some(pd.pid), None)?;
+                        let rv =
+                            wait::waitpid(Some(pd.pid), None).map_err(RedoError::opaque_error)?;
                         assert_eq!(rv.pid(), Some(pd.pid));
                         let status = match rv {
                             WaitStatus::Exited(_, status) => status,
                             WaitStatus::Signaled(_, signal, _) => -(signal as i32),
-                            _ => return Err(format_err!("unhandled process status: {:?}", rv)),
+                            _ => {
+                                // TODO(soon): Remove .into().
+                                return Err(RedoError::new(format!(
+                                    "unhandled process status: {:?}",
+                                    rv
+                                ))
+                                .into());
+                            }
                         };
                         debug_jobserver!("done1: rv={}", status);
                         {
@@ -445,11 +467,11 @@ impl JobServer {
 
     /// Release or destroy all the tokens we own, in preparation for exit.
     #[inline]
-    pub fn force_return_tokens(mut self) -> Result<(), Error> {
+    pub fn force_return_tokens(mut self) -> Result<(), RedoError> {
         self.do_force_return_tokens()
     }
 
-    fn do_force_return_tokens(&mut self) -> Result<(), Error> {
+    fn do_force_return_tokens(&mut self) -> Result<(), RedoError> {
         self.dropped = true;
         let mut state = self.state.borrow_mut();
         let n = state.wait_fds.len();
@@ -462,7 +484,9 @@ impl JobServer {
         state.wait_fds.clear();
         state.create_tokens(n as i32);
         if state.has_token() {
-            state.release_except_mine(self.params.token_fds)?;
+            state
+                .release_except_mine(self.params.token_fds)
+                .map_err(RedoError::opaque_error)?;
             assert_eq!(state.my_tokens, 1);
         }
         assert!(
@@ -484,7 +508,8 @@ impl JobServer {
                 cheats
             );
             state.destroy_tokens(cheats);
-            write_tokens(self.params.cheat_fds.1, state.cheats as usize)?;
+            write_tokens(self.params.cheat_fds.1, state.cheats as usize)
+                .map_err(RedoError::opaque_error)?;
         }
         Ok(())
     }
@@ -624,7 +649,7 @@ impl JobServerHandle {
     /// # Panics
     ///
     /// If `has_token()` returns `false`.
-    pub(crate) fn start<F>(&self, reason: String, job_func: F) -> Result<Job, Error>
+    pub(crate) fn start<F>(&self, reason: String, job_func: F) -> Result<Job, RedoError>
     where
         F: FnOnce() -> i32,
     {
@@ -635,8 +660,8 @@ impl JobServerHandle {
             // in order for the universe to stay in balance.
             state.destroy_tokens(1);
         }
-        let (r, w) = make_pipe(50)?;
-        match unsafe { unistd::fork()? } {
+        let (r, w) = make_pipe(50).map_err(RedoError::opaque_error)?;
+        match unsafe { unistd::fork() }.map_err(RedoError::opaque_error)? {
             ForkResult::Child => {
                 if let Err(e) = unistd::close(r) {
                     log_err!("close read end of pipe: {}\n", e);
@@ -647,8 +672,8 @@ impl JobServerHandle {
                 process::exit(rv);
             }
             ForkResult::Parent { child: pid } => {
-                helpers::close_on_exec(r, true)?;
-                unistd::close(w)?;
+                helpers::close_on_exec(r, true).map_err(RedoError::opaque_error)?;
+                unistd::close(w).map_err(RedoError::opaque_error)?;
                 let job_state = Rc::new(RefCell::new(JobState::default()));
                 self.state.borrow_mut().wait_fds.insert(
                     r,
@@ -712,9 +737,9 @@ impl JobServerHandle {
         &self,
         reason: &str,
         mut cheat_func: C,
-    ) -> Result<(), Error>
+    ) -> Result<(), RedoError>
     where
-        C: FnMut() -> Result<i32, Error>,
+        C: FnMut() -> Result<i32, RedoError>,
     {
         let mut backoff = Duration::from_millis(10);
         while !self.has_token() {
@@ -784,9 +809,11 @@ impl JobServerHandle {
         }
     }
 
-    pub(crate) fn release_mine(&self) -> Result<(), Error> {
+    pub(crate) fn release_mine(&self) -> Result<(), RedoError> {
         let mut state = self.state.borrow_mut();
-        state.release_mine(self.params.token_fds)?;
+        state
+            .release_mine(self.params.token_fds)
+            .map_err(RedoError::opaque_error)?;
         Ok(())
     }
 }
@@ -845,39 +872,43 @@ pub(crate) struct AllJobsDone {
 impl AllJobsDone {
     /// Ensure that the sum of the tokens and cheat tokens equals the number of
     /// tokens granted at top level.
-    fn test_tokens(&mut self) -> Result<(), Error> {
+    fn test_tokens(&mut self) -> Result<(), RedoError> {
         assert_ne!(self.params.top_level, 0);
         if self.state.borrow().my_tokens >= 1 {
             self.state
                 .borrow_mut()
-                .release_mine(self.params.token_fds)?;
+                .release_mine(self.params.token_fds)
+                .map_err(RedoError::opaque_error)?;
         }
         let mut tokens_buf = [0u8; 8192];
-        let tokens = try_read(self.params.token_fds.0, &mut tokens_buf)?.unwrap_or(0);
+        let tokens = try_read(self.params.token_fds.0, &mut tokens_buf)
+            .map_err(RedoError::opaque_error)?
+            .unwrap_or(0);
         let mut cheats_buf = [0u8; 8192];
-        let cheats = try_read(self.params.cheat_fds.0, &mut cheats_buf)?.unwrap_or(0);
+        let cheats = try_read(self.params.cheat_fds.0, &mut cheats_buf)
+            .map_err(RedoError::opaque_error)?
+            .unwrap_or(0);
         debug_jobserver!("toplevel: GOT {} tokens and {} cheats", tokens, cheats);
         if (tokens - cheats) as i32 != self.params.top_level {
-            return Err(format_err!(
+            return Err(RedoError::new(format!(
                 "on exit: expected {} tokens; found {}-{}",
-                self.params.top_level,
-                tokens,
-                cheats
-            ));
+                self.params.top_level, tokens, cheats
+            )));
         }
         // TODO(someday): Retry if interrupted or short write.
-        unistd::write(self.params.token_fds.1, &tokens_buf[..tokens])?;
+        unistd::write(self.params.token_fds.1, &tokens_buf[..tokens])
+            .map_err(RedoError::opaque_error)?;
         Ok(())
     }
 }
 
 impl Future for AllJobsDone {
-    type Output = Result<(), Error>;
+    type Output = Result<(), RedoError>;
 
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), RedoError>> {
         if self.done {
-            return Poll::Ready(Err(format_err!(
-                "AllJobsDone::poll called on finished future"
+            return Poll::Ready(Err(RedoError::new(
+                "AllJobsDone::poll called on finished future",
             )));
         }
         while self.state.borrow().my_tokens >= 2 {
@@ -887,7 +918,7 @@ impl Future for AllJobsDone {
             };
             if let Err(e) = res {
                 self.done = true;
-                return Poll::Ready(Err(e.into()));
+                return Poll::Ready(Err(RedoError::opaque_error(e)));
             }
         }
         if !self.state.borrow().is_running() {
@@ -913,7 +944,7 @@ impl Future for AllJobsDone {
             let res = self.state.borrow_mut().release_mine(self.params.token_fds);
             if let Err(e) = res {
                 self.done = true;
-                return Poll::Ready(Err(e.into()));
+                return Poll::Ready(Err(RedoError::opaque_error(e)));
             }
         }
         debug_jobserver!("wait_all: wait()");
@@ -1072,8 +1103,7 @@ fn write_tokens(fd: RawFd, n: usize) -> nix::Result<()> {
     Ok(())
 }
 
-fn parse_makeflags<S: AsRef<OsStr>>(flags: S) -> Result<Option<(RawFd, RawFd)>, Error> {
-    use failure::ResultExt;
+fn parse_makeflags<S: AsRef<OsStr>>(flags: S) -> Result<Option<(RawFd, RawFd)>, RedoError> {
     use std::os::unix::ffi::OsStrExt;
 
     let flags = flags.as_ref();
@@ -1101,15 +1131,15 @@ fn parse_makeflags<S: AsRef<OsStr>>(flags: S) -> Result<Option<(RawFd, RawFd)>, 
         Some((find, ofs)) => {
             let s = &flags[ofs + find.len()..];
             let arg = str::from_utf8(&s[..s.iter().copied().position(|b| b == b' ').unwrap()])
-                .context("invalid MAKEFLAGS")?;
+                .map_err(|e| RedoError::wrap(e, "invalid MAKEFLAGS"))?;
             let comma = match arg.find(',') {
                 Some(i) => i,
-                None => return Err(format_err!("invalid --jobserver-auth: {}", arg)),
+                None => return Err(RedoError::new(format!("invalid --jobserver-auth: {}", arg))),
             };
             let a = str::parse::<RawFd>(&arg[..comma])
-                .with_context(|_| format!("invalid --jobserver-auth: {}", arg))?;
+                .map_err(|e| RedoError::wrap(e, format!("invalid --jobserver-auth: {}", arg)))?;
             let b = str::parse::<RawFd>(&arg[comma + 1..])
-                .with_context(|_| format!("invalid --jobserver-auth: {}", arg))?;
+                .map_err(|e| RedoError::wrap(e, format!("invalid --jobserver-auth: {}", arg)))?;
             Ok(Some((a, b)))
         }
         None => Ok(None),
@@ -1128,7 +1158,7 @@ mod tests {
         let mut server = JobServer::setup(1).unwrap();
         let job = server.handle().start("foo".into(), || 4).unwrap();
         let rv = server
-            .block_on(async { Result::<_, Error>::Ok(job.await) })
+            .block_on(async { Result::<_, RedoError>::Ok(job.await) })
             .unwrap();
         assert_eq!(rv, 4);
     }
@@ -1143,7 +1173,7 @@ mod tests {
         const SLEEP_DURATION: Duration = Duration::from_millis(100);
         let timer = server.handle().sleep(SLEEP_DURATION);
         let awake = server
-            .block_on(async { Result::<_, Error>::Ok(timer.await) })
+            .block_on(async { Result::<_, RedoError>::Ok(timer.await) })
             .unwrap();
         assert!(
             awake - start >= SLEEP_DURATION,
@@ -1172,7 +1202,7 @@ mod tests {
             .unwrap();
         let timer = server.handle().sleep(SLEEP_DURATION);
         let (rv, awake) = server
-            .block_on(async { Result::<_, Error>::Ok(future::join(job, timer).await) })
+            .block_on(async { Result::<_, RedoError>::Ok(future::join(job, timer).await) })
             .unwrap();
         assert_eq!(rv, 4);
         assert!(

@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt::{self, Display, Formatter};
@@ -23,34 +24,58 @@ use super::helpers::RedoPathBuf;
 /// The error type for the `redo` crate.
 #[derive(Debug)]
 pub struct RedoError {
-    pub(crate) kind: RedoErrorKind,
-    pub(crate) msg: String,
+    kind: RedoErrorKind,
+    msg: Cow<'static, str>,
+    cause: Option<Box<dyn Error + Send + Sync + 'static>>,
 }
 
 impl RedoError {
     /// Returns a generic error with the given message.
     #[inline]
-    pub fn new(msg: String) -> RedoError {
+    pub fn new<S>(msg: S) -> RedoError
+    where
+        S: Into<Cow<'static, str>>,
+    {
         RedoError {
             kind: RedoErrorKind::default(),
-            msg,
+            msg: msg.into(),
+            cause: None,
         }
     }
 
+    /// Returns a generic error that contains another error as its message.
+    /// The error is not presented on the source chain.
     #[inline]
-    pub(crate) fn wrap_generic<E>(e: E) -> RedoError
+    pub(crate) fn opaque_error<E: Display>(e: E) -> RedoError {
+        RedoError {
+            kind: RedoErrorKind::default(),
+            msg: Cow::Owned(format!("redo: {}", e)),
+            cause: None,
+        }
+    }
+
+    /// Returns a `RedoError` that wraps an underlying error.
+    #[inline]
+    pub(crate) fn wrap<E, S>(cause: E, msg: S) -> RedoError
     where
         E: Error + Send + Sync + 'static,
+        S: Into<Cow<'static, str>>,
     {
         RedoError {
-            kind: RedoErrorKind::Generic,
-            msg: format!("redo: {}", e),
+            kind: RedoErrorKind::default(),
+            msg: msg.into(),
+            cause: Some(Box::new(cause)),
         }
     }
 
     #[inline]
     pub fn kind(&self) -> &RedoErrorKind {
         &self.kind
+    }
+
+    #[inline]
+    pub(crate) fn with_kind(self, kind: RedoErrorKind) -> RedoError {
+        RedoError { kind, ..self }
     }
 }
 
@@ -65,8 +90,9 @@ impl Error for RedoError {}
 impl From<RedoErrorKind> for RedoError {
     fn from(kind: RedoErrorKind) -> RedoError {
         RedoError {
-            msg: format!("{}", kind),
+            msg: Cow::Owned(kind.to_string()),
             kind,
+            cause: None,
         }
     }
 }
@@ -78,6 +104,25 @@ pub enum RedoErrorKind {
     FailedInAnotherThread { target: RedoPathBuf },
     InvalidTarget(OsString),
     CyclicDependency,
+}
+
+impl RedoErrorKind {
+    /// Returns the first non-[`RedoErrorKind::Generic`] error kind in the error chain or
+    /// [`RedoErrorKind::Generic`]
+    pub fn of<E: Error + 'static>(e: &E) -> &RedoErrorKind {
+        let mut curr: Option<&(dyn Error + 'static)> = Some(e);
+        while let Some(e) = curr {
+            let kind = match e.downcast_ref::<RedoError>() {
+                Some(e) => e.kind(),
+                None => continue,
+            };
+            if kind != &RedoErrorKind::Generic {
+                return kind;
+            }
+            curr = e.source();
+        }
+        &RedoErrorKind::Generic
+    }
 }
 
 impl Default for RedoErrorKind {

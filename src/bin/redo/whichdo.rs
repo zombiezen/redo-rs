@@ -24,7 +24,7 @@ use std::path::Path;
 use std::process;
 
 use redo::logs::LogBuilder;
-use redo::{self, log_err, Env};
+use redo::{self, log_err, Env, EXIT_INVALID_TARGET};
 
 pub(crate) fn run() -> Result<(), Error> {
     if env::args_os().len() != 2 {
@@ -37,7 +37,7 @@ pub(crate) fn run() -> Result<(), Error> {
     let want = env::args_os().nth(1).unwrap();
     if want.is_empty() {
         log_err!("cannot build the empty target (\"\").\n");
-        process::exit(204);
+        process::exit(EXIT_INVALID_TARGET);
     }
     let want = redo::abs_path(&env::current_dir()?, Path::new(&want));
     for df in redo::possible_do_files(want) {

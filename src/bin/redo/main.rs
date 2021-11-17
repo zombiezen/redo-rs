@@ -38,7 +38,7 @@ use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
 use redo::logs::LogBuilder;
 use redo::{
     self, log_err, log_warn, Dirtiness, Env, JobServer, OptionalBool, ProcessState,
-    ProcessTransaction, RedoPath,
+    ProcessTransaction, RedoPath, EXIT_FAILURE, EXIT_SUCCESS,
 };
 
 fn main() {
@@ -64,7 +64,7 @@ fn main() {
         _ => run_redo(),
     };
     match result {
-        Ok(_) => std::process::exit(0),
+        Ok(_) => std::process::exit(EXIT_SUCCESS),
         Err(e) => {
             if let Some(bt) = e
                 .iter_chain()
@@ -85,7 +85,7 @@ fn main() {
             let retcode = e
                 .downcast_ref::<builder::BuildError>()
                 .map(|be| i32::from(be.kind()))
-                .unwrap_or(1);
+                .unwrap_or(EXIT_FAILURE);
             std::process::exit(retcode)
         }
     }

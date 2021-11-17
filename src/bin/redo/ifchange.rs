@@ -101,7 +101,7 @@ pub(crate) fn run() -> Result<(), Error> {
 fn should_build(ptx: &mut ProcessTransaction, t: &RedoPath) -> Result<(bool, Dirtiness), Error> {
     let mut f = redo::File::from_name(ptx, t, true)?;
     if f.is_failed(ptx.state().env()) {
-        // TODO(soon): ImmediateReturn(32)
+        // TODO(soon): ImmediateReturn(EXIT_TARGET_FAILED)
         return Err(format_err!("target {} failed", t));
     }
     let dirty = match redo::is_dirty(ptx, &mut f, &mut Default::default())? {

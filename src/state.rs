@@ -51,6 +51,7 @@ use std::time::{Duration, SystemTime};
 use super::builder::BuildError;
 use super::cycles;
 use super::env::Env;
+use super::exits::*;
 use super::helpers::{self, RedoPath, RedoPathBuf};
 
 const SCHEMA_VER: i32 = 2;
@@ -1160,14 +1161,14 @@ impl LockManager {
         pl.wait_lock(LockType::Exclusive)?;
         match unsafe { unistd::fork() } {
             Ok(ForkResult::Parent { child: pid }) => match wait::waitpid(pid, None) {
-                Ok(WaitStatus::Exited(_, status)) => Ok(status != 0),
+                Ok(WaitStatus::Exited(_, status)) => Ok(status != EXIT_SUCCESS),
                 Ok(_) => Ok(true),
                 Err(e) => Err(e.into()),
             },
             Ok(ForkResult::Child) => {
                 // Doesn't actually unlock, since child process doesn't own it.
                 if let Err(_) = pl.unlock() {
-                    process::exit(99);
+                    process::exit(EXIT_HELPER_FAILURE);
                 }
                 mem::drop(pl);
                 let mut cl = Lock::new(child_manager_ref, 0);
@@ -1175,15 +1176,15 @@ impl LockManager {
                 match cl.try_lock() {
                     Ok(true) => {
                         // Got the lock? Yikes, the locking system is broken!
-                        process::exit(1);
+                        process::exit(EXIT_FAILURE);
                     }
                     Ok(false) => {
                         // Failed to get the lock? Good, the parent owns it.
-                        process::exit(0);
+                        process::exit(EXIT_SUCCESS);
                     }
                     Err(_) => {
                         // Some other error occurred. Stay safe and report failure.
-                        process::exit(1);
+                        process::exit(EXIT_FAILURE);
                     }
                 }
             }

@@ -24,7 +24,7 @@ use std::io;
 use std::process::{self, Command};
 
 use redo::logs::LogBuilder;
-use redo::{self, Env};
+use redo::{self, Env, EXIT_FAILURE};
 
 pub(crate) fn run() -> Result<(), Error> {
     let mut args = env::args_os();
@@ -46,7 +46,7 @@ pub(crate) fn run() -> Result<(), Error> {
         .spawn()?
         .wait()?;
     if !status.success() {
-        process::exit(status.code().unwrap_or(1));
+        process::exit(status.code().unwrap_or(EXIT_FAILURE));
     }
 
     // We know our caller already owns the lock on target, so we don't have to
@@ -61,7 +61,7 @@ pub(crate) fn run() -> Result<(), Error> {
         .spawn()?
         .wait()?;
     if !status.success() {
-        process::exit(status.code().unwrap_or(1));
+        process::exit(status.code().unwrap_or(EXIT_FAILURE));
     }
     Ok(())
 }

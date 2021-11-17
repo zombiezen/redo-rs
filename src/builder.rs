@@ -53,6 +53,7 @@ use zombiezen_const_cstr::const_cstr;
 use super::cycles;
 use super::deps::Dirtiness;
 use super::env::{Env, OptionalBool};
+use super::exits::*;
 use super::helpers::{self, OsBytes, RedoPath, RedoPathBuf};
 use super::jobserver::JobServerHandle;
 use super::logs::{self, LogBuilder};
@@ -69,8 +70,6 @@ struct BuildJob<'a> {
 }
 
 impl BuildJob<'_> {
-    const INTERNAL_ERROR_EXIT: i32 = 209;
-
     /// Actually start running this job in a subproc, if needed.
     ///
     /// `ps_ref` must be the same state as in `ptx`. `ps_ref` is mutably borrowed
@@ -94,7 +93,7 @@ impl BuildJob<'_> {
                         None,
                     );
                 }
-                Ok(Box::pin(future::ready(0)))
+                Ok(Box::pin(future::ready(EXIT_SUCCESS)))
             }
             Dirtiness::Dirty => self.start_self(ps_ref, ptx, server, before_t),
             Dirtiness::NeedTargets(targets) => {
@@ -152,7 +151,7 @@ impl BuildJob<'_> {
                 sf.set_static(ptx.state().env())?;
             }
             sf.save(&mut ptx)?;
-            return Ok(Box::pin(future::ready(0)));
+            return Ok(Box::pin(future::ready(EXIT_SUCCESS)));
         }
         sf.zap_deps1(&mut ptx)?;
         let df = match paths::find_do_file(&mut ptx, &mut sf)? {
@@ -160,11 +159,11 @@ impl BuildJob<'_> {
             None => {
                 let rv = if Path::new(&t).exists() {
                     sf.set_static(ptx.state().env())?;
-                    0
+                    EXIT_SUCCESS
                 } else {
                     log_err!("no rule to redo {:?}\n", &t);
                     sf.set_failed(ptx.state().env())?;
-                    1
+                    EXIT_FAILURE
                 };
                 sf.save(&mut ptx)?;
                 return Ok(Box::pin(future::ready(rv)));
@@ -287,7 +286,7 @@ impl BuildJob<'_> {
             assert!(ps.is_flushed());
             let newp = match df.do_dir.canonicalize() {
                 Ok(newp) => newp,
-                Err(_) => return 1,
+                Err(_) => return EXIT_FAILURE,
             };
             // CDPATH apparently caused unexpected 'cd' output on some platforms.
             env::remove_var("CDPATH");
@@ -295,7 +294,7 @@ impl BuildJob<'_> {
                 "REDO_PWD",
                 match state::relpath(newp, &ps.env().startdir) {
                     Ok(path) => path,
-                    Err(_) => return 1,
+                    Err(_) => return EXIT_FAILURE,
                 },
             );
             env::set_var("REDO_TARGET", {
@@ -319,16 +318,16 @@ impl BuildJob<'_> {
             cycles::add(lock.file_id().to_string());
             if !df.do_dir.as_os_str().is_empty() {
                 if env::set_current_dir(&df.do_dir).is_err() {
-                    return 1;
+                    return EXIT_FAILURE;
                 }
             }
             let out_file = out_file.take().unwrap();
             if unistd::dup2(out_file.as_raw_fd(), 1).is_err() {
-                return 1;
+                return EXIT_FAILURE;
             }
             mem::drop(out_file);
             if helpers::close_on_exec(1, false).is_err() {
-                return 1;
+                return EXIT_FAILURE;
             }
             if ps.env().log().unwrap_or(true) {
                 let cur_inode = stat::fstat(2)
@@ -344,7 +343,7 @@ impl BuildJob<'_> {
                         Ok(logf) => logf,
                         Err(e) => {
                             eprintln!("create log: {}", e);
-                            return 1;
+                            return EXIT_FAILURE;
                         }
                     };
                     let new_inode = logf
@@ -361,7 +360,7 @@ impl BuildJob<'_> {
                 env::set_var("REDO_LOG", "0");
             }
             if unsafe { signal::signal(Signal::SIGPIPE, SigHandler::SigDfl) }.is_err() {
-                return 1;
+                return EXIT_FAILURE;
             }
             if ps.env().verbose != 0 || ps.env().xtrace != 0 {
                 let mut s = String::new();
@@ -379,7 +378,7 @@ impl BuildJob<'_> {
             );
             let _ = unistd::execvp(argv[0].as_c_str(), argv.as_slice());
             // Returns only if execvp failed.
-            1
+            EXIT_FAILURE
         })?;
         let out_file = out_file.take().unwrap();
         Ok(Box::pin(async move {
@@ -388,14 +387,14 @@ impl BuildJob<'_> {
             let mut ps = ps_ref.borrow_mut();
             let mut ptx = match ProcessTransaction::new(*ps, TransactionBehavior::Immediate) {
                 Ok(ptx) => ptx,
-                Err(_) => return BuildJob::INTERNAL_ERROR_EXIT,
+                Err(_) => return EXIT_BUILD_JOB_ERROR,
             };
             rv = BuildJob::record_new_state(
                 &mut ptx, &t, sf, &before_t, out_file, &tmp_name, &argv, rv,
             );
             if let Err(e) = ptx.commit() {
                 eprintln!("{:?}: {}", &t, e);
-                return BuildJob::INTERNAL_ERROR_EXIT;
+                return EXIT_BUILD_JOB_ERROR;
             }
             rv
         }))
@@ -455,12 +454,12 @@ impl BuildJob<'_> {
                 depth
             });
             if unsafe { signal::signal(Signal::SIGPIPE, SigHandler::SigDfl) }.is_err() {
-                return 1;
+                return EXIT_FAILURE;
             }
             let _ = unistd::execvp(&argv[0], argv.as_slice());
             // Returns only if execvp failed.
             eprintln!("Failed to exec: {:?}", argv);
-            1
+            EXIT_FAILURE
         })?;
         let lock = self.lock;
         Ok(Box::pin(async move {
@@ -509,13 +508,13 @@ impl BuildJob<'_> {
         if modified {
             eprintln!("{:?} modified {} directly!", argv[2].as_ref(), t);
             eprintln!("... you should update $3 (a temp file) or stdout, not $1.");
-            rv = 206;
+            rv = EXIT_TARGET_DIRECTLY_MODIFIED;
         } else if st2.is_some() && st1.size() > 0 {
             eprintln!("{:?} wrote to stdout *and* created $3.", argv[2].as_ref());
             eprintln!("... you should write status messages to stderr, not stdout.");
-            rv = 207;
+            rv = EXIT_MULTIPLE_OUTPUTS;
         }
-        if rv == 0 {
+        if rv == EXIT_SUCCESS {
             // FIXME: race condition here between updating stamp/is_generated
             // and actually renaming the files into place.  There needs to
             // be some kind of two-stage commit, I guess.
@@ -541,7 +540,7 @@ impl BuildJob<'_> {
                             // the target directory.
                             log_err!("{:?}: copy stdout: {}", t, e);
                         }
-                        rv = BuildJob::INTERNAL_ERROR_EXIT;
+                        rv = EXIT_BUILD_JOB_ERROR;
                     }
                     Ok(mut newf) => {
                         out_file
@@ -562,7 +561,7 @@ impl BuildJob<'_> {
                     // This could happen for, eg. a permissions error on
                     // the target directory.
                     log_err!("{:?}: rename {:?}: {}", t, tmp_name, e);
-                    rv = BuildJob::INTERNAL_ERROR_EXIT;
+                    rv = EXIT_BUILD_JOB_ERROR;
                 }
             } else {
                 // no output generated at all; that's ok
@@ -578,7 +577,7 @@ impl BuildJob<'_> {
             }
             if let Err(e) = sf.refresh(ptx) {
                 log_err!("{:?}: refresh: {}", t, e);
-                rv = BuildJob::INTERNAL_ERROR_EXIT;
+                rv = EXIT_BUILD_JOB_ERROR;
             }
             sf.is_generated = true;
             sf.is_override = false;
@@ -594,26 +593,26 @@ impl BuildJob<'_> {
                 sf.set_checksum(String::new());
                 if let Err(e) = sf.update_stamp(ptx.state().env(), false) {
                     log_err!("{:?}: update stamp: {}", t, e);
-                    rv = BuildJob::INTERNAL_ERROR_EXIT;
+                    rv = EXIT_BUILD_JOB_ERROR;
                 }
                 sf.set_changed(ptx.state().env());
             }
         }
         // rv might have changed up above
-        if rv != 0 {
+        if rv != EXIT_SUCCESS {
             helpers::unlink(tmp_name).expect("failed to remove temporary output file");
             if let Err(e) = sf.set_failed(ptx.state().env()) {
                 log_err!("{:?}: set failed: {}", t, e);
-                rv = BuildJob::INTERNAL_ERROR_EXIT;
+                rv = EXIT_BUILD_JOB_ERROR;
             }
         }
         if let Err(e) = sf.zap_deps2(ptx) {
             log_err!("{:?}: zap_deps2: {}", t, e);
-            rv = BuildJob::INTERNAL_ERROR_EXIT;
+            rv = EXIT_BUILD_JOB_ERROR;
         }
         if let Err(e) = sf.save(ptx) {
             log_err!("{:?}: set failed: {}", t, e);
-            rv = BuildJob::INTERNAL_ERROR_EXIT;
+            rv = EXIT_BUILD_JOB_ERROR;
         }
         logs::meta(
             "done",
@@ -772,7 +771,7 @@ where
                     let result = &result;
                     job_futures.push(Box::pin(async move {
                         let rv = job.await;
-                        if rv != 0 {
+                        if rv != EXIT_SUCCESS {
                             result.set(Err(format_err!("{:?}: exit code {}", t, rv)
                                 .context(BuildErrorKind::Generic)
                                 .into()));
@@ -882,7 +881,7 @@ where
                     let result = &result;
                     job_futures.push(Box::pin(async move {
                         let rv = job.await;
-                        if rv != 0 {
+                        if rv != EXIT_SUCCESS {
                             result.set(Err(format_err!("{:?}: exit code {}", t, rv)
                                 .context(BuildErrorKind::Generic)
                                 .into()));
@@ -1027,7 +1026,7 @@ impl StdinLogReaderBuilder {
                 if b.is_empty() {
                     // subprocess died without sending us anything: that's bad.
                     log_err!("failed to start redo-log subprocess; cannot continue.\n");
-                    process::exit(99);
+                    process::exit(EXIT_HELPER_FAILURE);
                 }
                 assert_eq!(b, b"REDO-OK\n");
                 // now we know the subproc is running and will report our errors
@@ -1102,7 +1101,7 @@ impl StdinLogReaderBuilder {
                 if let Err(e) = res {
                     eprintln!("redo-log: exec: {:?}", e);
                 }
-                process::exit(99);
+                process::exit(EXIT_HELPER_FAILURE);
             }
         }
     }
@@ -1213,9 +1212,9 @@ impl Default for BuildErrorKind {
 impl From<&BuildErrorKind> for i32 {
     fn from(kind: &BuildErrorKind) -> i32 {
         match kind {
-            BuildErrorKind::FailedInAnotherThread(_) => 2,
-            BuildErrorKind::InvalidTarget(_) => 204,
-            _ => 1,
+            BuildErrorKind::FailedInAnotherThread(_) => EXIT_FAILED_IN_ANOTHER_THREAD,
+            BuildErrorKind::InvalidTarget(_) => EXIT_INVALID_TARGET,
+            _ => EXIT_FAILURE,
         }
     }
 }

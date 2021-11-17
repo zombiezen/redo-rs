@@ -32,7 +32,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use redo::logs::{self, LogBuilder, Meta};
-use redo::{self, Env, Lock, LockType, ProcessState, ProcessTransaction, RedoPath};
+use redo::{
+    self, Env, Lock, LockType, ProcessState, ProcessTransaction, RedoPath, EXIT_FAILURE,
+    EXIT_UNKNOWN_TARGET,
+};
 
 use super::{auto_bool_arg, log_flags};
 
@@ -67,7 +70,7 @@ pub(crate) fn run() -> Result<(), Error> {
     };
     if targets.is_empty() {
         eprintln!("redo-log give at least one target; maybe \"all\"?");
-        process::exit(1);
+        process::exit(EXIT_FAILURE);
     }
 
     let mut env = Env::init(&targets)?;
@@ -168,7 +171,7 @@ impl LogState {
                                 env::current_dir()?.as_os_str().to_string_lossy(),
                                 t
                             );
-                            process::exit(24);
+                            process::exit(EXIT_UNKNOWN_TARGET);
                         }
                         Err(e) => return Err(e.into()),
                     }

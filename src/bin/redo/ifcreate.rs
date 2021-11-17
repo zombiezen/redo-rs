@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use redo::logs::LogBuilder;
-use redo::{self, log_err, DepMode, Env, ProcessState, ProcessTransaction};
+use redo::{self, log_err, DepMode, Env, ProcessState, ProcessTransaction, EXIT_INVALID_TARGET};
 
 /// Build the current target if these targets are created.
 pub(crate) fn run() -> Result<(), Error> {
@@ -39,7 +39,7 @@ pub(crate) fn run() -> Result<(), Error> {
     for t in std::env::args_os().skip(1) {
         if t.is_empty() {
             log_err!("cannot build the empty target (\"\").\n");
-            process::exit(204);
+            process::exit(EXIT_INVALID_TARGET);
         }
         if Path::new(&t).exists() {
             return Err(format_err!("{:?} already exists", t));

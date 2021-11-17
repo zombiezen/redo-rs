@@ -117,6 +117,7 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::exits::*;
 use super::helpers::{self, IntervalTimer, IntervalTimerValue};
 
 macro_rules! debug_jobserver {
@@ -180,7 +181,7 @@ impl JobServer {
                     log_err!(
                         "  otherwise, see https://redo.rtfd.io/en/latest/FAQParallel/#MAKEFLAGS\n"
                     );
-                    // TODO(soon): ImmediateReturn(200)
+                    // TODO(soon): ImmediateReturn(EXIT_INVALID_JOBSERVER)
                     return Err(format_err!("broken --jobserver-auth from parent process"));
                 }
                 match max_jobs {
@@ -639,7 +640,7 @@ impl JobServerHandle {
             ForkResult::Child => {
                 if let Err(e) = unistd::close(r) {
                     log_err!("close read end of pipe: {}\n", e);
-                    process::exit(201);
+                    process::exit(EXIT_JOB_FAILURE);
                 }
                 let rv = job_func();
                 debug_jobserver!("exit: {}", rv);

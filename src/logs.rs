@@ -15,11 +15,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use failure::{format_err, Error};
 use lazy_static::lazy_static;
 use libc::pid_t;
 use nix::unistd::{self, Pid};
 use std::env;
+use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -461,23 +461,26 @@ impl<'a> Meta<'a> {
     const SEP: &'static str = "@@ ";
 
     /// Parses a log-line in-place.
-    pub fn parse(s: &'a str) -> Result<Meta<'a>, Error> {
-        use failure::ResultExt;
-
+    pub fn parse(s: &'a str) -> Result<Meta<'a>, MetaParseError> {
         if !s.starts_with(Meta::PREFIX) {
-            return Err(format_err!(
+            return Err(MetaParseError::new(format!(
                 "{:?} does not begin with {:?}",
                 s,
                 Meta::PREFIX
-            ));
+            )));
         }
         if s.contains('\n') {
-            return Err(format_err!("{:?} contains a newline", s));
+            return Err(MetaParseError::new(format!("{:?} contains a newline", s)));
         }
         let (_, meta_and_text) = s.split_at(Meta::PREFIX.len());
         let meta_end = match meta_and_text.find(Meta::SEP) {
             Some(i) => i,
-            None => return Err(format_err!("{:?} has unterminated metadata", s)),
+            None => {
+                return Err(MetaParseError::new(format!(
+                    "{:?} has unterminated metadata",
+                    s
+                )))
+            }
         };
         let (meta, text) = {
             let (meta, line_with_sep) = meta_and_text.split_at(meta_end);
@@ -485,20 +488,27 @@ impl<'a> Meta<'a> {
             (meta, line)
         };
         if meta.contains('@') {
-            return Err(format_err!("{:?} contains @ inside metadata", s));
+            return Err(MetaParseError::new(format!(
+                "{:?} contains @ inside metadata",
+                s
+            )));
         }
         let mut words = meta.split(':');
         let kind = words.next().unwrap();
         let pid = match words.next() {
-            Some(pid) => {
-                str::parse::<pid_t>(pid).with_context(|_| format!("cannot parse pid in {:?}", s))?
-            }
-            None => return Err(format_err!("{:?} is missing a pid", s)),
+            Some(pid) => str::parse::<pid_t>(pid)
+                .map_err(|_| MetaParseError::new(format!("cannot parse pid in {:?}", s)))?,
+            None => return Err(MetaParseError::new(format!("{:?} is missing a pid", s))),
         };
         let timestamp = match words.next() {
             Some(timestamp) => str::parse::<f64>(timestamp)
-                .with_context(|_| format!("cannot parse timestamp in {:?}", s))?,
-            None => return Err(format_err!("{:?} is missing a timestamp", s)),
+                .map_err(|_| MetaParseError::new(format!("cannot parse timestamp in {:?}", s)))?,
+            None => {
+                return Err(MetaParseError::new(format!(
+                    "{:?} is missing a timestamp",
+                    s
+                )))
+            }
         };
         // TODO(maybe): Store additional fields?
 
@@ -568,6 +578,27 @@ impl<'a> Display for Meta<'a> {
         )
     }
 }
+
+/// The error type returned from [`Meta::parse`].
+#[derive(Debug)]
+pub struct MetaParseError {
+    msg: String,
+}
+
+impl MetaParseError {
+    #[inline]
+    fn new(msg: String) -> Self {
+        MetaParseError { msg }
+    }
+}
+
+impl Display for MetaParseError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Display::fmt(&self.msg, f)
+    }
+}
+
+impl Error for MetaParseError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ColorEscapes {

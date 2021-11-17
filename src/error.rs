@@ -21,7 +21,7 @@ use std::fmt::{self, Display, Formatter};
 
 use super::helpers::RedoPathBuf;
 
-/// The error type for the `redo` crate.
+/// The primary error type for the `redo` crate.
 #[derive(Debug)]
 pub struct RedoError {
     kind: RedoErrorKind,

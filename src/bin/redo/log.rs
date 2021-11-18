@@ -83,11 +83,11 @@ pub(crate) fn run() -> Result<(), Error> {
     let mut ps = ProcessState::init(env)?;
     let status =
         auto_bool_arg(&matches, "status").unwrap_or_else(|| unistd::isatty(2).unwrap_or(false));
-    LogBuilder::new()
+    LogBuilder::from(ps.env())
         .parent_logs(false)
         .pretty(auto_bool_arg(&matches, "pretty").unwrap_or(true))
         .color(auto_bool_arg(&matches, "color"))
-        .setup(ps.env(), io::stdout());
+        .setup(io::stdout());
     if let Some(ack_fd) = matches.value_of("ack-fd") {
         // Write back to owner, to let them know we started up okay and
         // will be able to see their error output, so it's okay to close

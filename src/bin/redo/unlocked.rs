@@ -32,7 +32,7 @@ pub(crate) fn run() -> Result<(), Error> {
         return Err(anyhow!("at least 2 arguments expected."));
     }
     let env = Env::inherit()?;
-    LogBuilder::from(&env).setup(&env, io::stderr());
+    LogBuilder::from(&env).setup(io::stderr());
 
     let target = args.nth(1).unwrap();
     let deps: Vec<OsString> = args.collect();

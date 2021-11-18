@@ -116,7 +116,7 @@ impl<W: Write> Logger for PrettyLog<W> {
                 let _ = self.file.write(line[..start].as_bytes());
                 match meta.kind {
                     "unchanged" => {
-                        if self.config.log.unwrap_or(true) || self.config.debug != 0 {
+                        if self.config.log || self.config.debug != 0 {
                             self.pretty(
                                 &mut buf,
                                 meta.pid,
@@ -229,14 +229,28 @@ impl<W: Write> Logger for PrettyLog<W> {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct PrettyLogConfig {
     debug: i32,
     debug_locks: bool,
     debug_pids: bool,
     verbose: i32,
     xtrace: i32,
-    log: OptionalBool,
+    log: bool,
+}
+
+impl Default for PrettyLogConfig {
+    #[inline]
+    fn default() -> PrettyLogConfig {
+        PrettyLogConfig {
+            debug: 0,
+            debug_locks: false,
+            debug_pids: false,
+            verbose: 0,
+            xtrace: 0,
+            log: true,
+        }
+    }
 }
 
 impl From<&Env> for PrettyLogConfig {
@@ -247,7 +261,7 @@ impl From<&Env> for PrettyLogConfig {
             debug_pids: e.debug_pids(),
             verbose: e.verbose,
             xtrace: e.xtrace,
-            log: e.log(),
+            log: e.log().unwrap_or(true),
         }
     }
 }
@@ -259,21 +273,14 @@ lazy_static! {
 /// A builder used for setting up logs.
 #[derive(Clone, Debug)]
 pub struct LogBuilder {
-    parent_logs: bool,
+    parent_logs: bool, // TODO(maybe): deduplicate with config.log
     pretty: bool,
     color: OptionalBool,
+    depth: usize,
+    config: PrettyLogConfig,
 }
 
 impl LogBuilder {
-    #[inline]
-    pub fn new() -> LogBuilder {
-        LogBuilder {
-            parent_logs: false,
-            pretty: true,
-            color: OptionalBool::Auto,
-        }
-    }
-
     /// Signal whether the parent process logs.
     #[inline]
     pub fn parent_logs(&mut self, val: bool) -> &mut Self {
@@ -310,19 +317,19 @@ impl LogBuilder {
     }
 
     /// Set up the process-wide logger with the builder's settings.
-    pub fn setup<W: WriteWithMaybeFd + Send + 'static>(&self, env: &Env, tty: W) {
+    pub fn setup<W: WriteWithMaybeFd + Send + 'static>(&self, tty: W) {
         let logger: Box<dyn Logger + Send> = if self.pretty && !self.parent_logs {
             let escapes = tty
                 .as_raw_fd()
                 .map(|fd| check_tty(fd, self.color))
                 .unwrap_or_default();
-            Box::new(PrettyLog::new(tty, escapes, env.into()))
+            Box::new(PrettyLog::new(tty, escapes, self.config.clone()))
         } else {
             Box::new(RawLog::new(tty))
         };
 
-        DEBUG_LEVEL.store(env.debug, Ordering::SeqCst);
-        set_depth(env.depth().len());
+        DEBUG_LEVEL.store(self.config.debug, Ordering::SeqCst);
+        set_depth(self.depth);
         {
             let mut global_logger = GLOBAL_LOGGER.lock().unwrap();
             *global_logger = Some(logger);
@@ -333,7 +340,13 @@ impl LogBuilder {
 impl Default for LogBuilder {
     #[inline]
     fn default() -> LogBuilder {
-        LogBuilder::new()
+        LogBuilder {
+            parent_logs: true,
+            pretty: true,
+            color: OptionalBool::Auto,
+            depth: 0,
+            config: PrettyLogConfig::default(),
+        }
     }
 }
 
@@ -343,6 +356,8 @@ impl From<&Env> for LogBuilder {
             parent_logs: e.log().unwrap_or(true),
             pretty: e.pretty().unwrap_or(true),
             color: e.color(),
+            depth: e.depth().len(),
+            config: e.into(),
         }
     }
 }
@@ -415,7 +430,7 @@ pub fn write(line: &str) {
     }
     // Fallback to stderr, showing everything.
     // This is helpful for debugging early startup.
-    let escapes = check_tty(AsRawFd::as_raw_fd(&io::stderr()), OptionalBool::Off);
+    let escapes = check_tty(AsRawFd::as_raw_fd(&io::stderr()), OptionalBool::Auto);
     let mut logger = PrettyLog::new(
         io::stderr(),
         escapes,

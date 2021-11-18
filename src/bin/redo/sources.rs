@@ -32,7 +32,7 @@ pub(crate) fn run() -> Result<(), Error> {
 
     let targets: &[&RedoPath] = &[];
     let env = Env::init(targets)?;
-    LogBuilder::from(&env).setup(&env, io::stderr());
+    LogBuilder::from(&env).setup(io::stderr());
 
     let cwd = env::current_dir()?;
     let mut ps = ProcessState::init(env)?;

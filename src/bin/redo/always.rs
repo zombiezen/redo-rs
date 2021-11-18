@@ -25,7 +25,7 @@ use redo::{self, DepMode, Env, ProcessState, ProcessTransaction, Stamp};
 
 pub(crate) fn run() -> Result<(), Error> {
     let env = Env::inherit()?;
-    LogBuilder::from(&env).setup(&env, io::stderr());
+    LogBuilder::from(&env).setup(io::stderr());
 
     let mut me = PathBuf::new();
     me.push(env.startdir());

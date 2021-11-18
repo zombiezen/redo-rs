@@ -47,7 +47,7 @@ pub(crate) fn run() -> Result<(), anyhow::Error> {
         builder::close_stdin()?;
         _stdin_log_reader = Some(StdinLogReaderBuilder::default().start(ps.env())?);
     } else {
-        LogBuilder::from(ps.env()).setup(ps.env(), io::stderr());
+        LogBuilder::from(ps.env()).setup(io::stderr());
     }
 
     let mut server;

@@ -36,7 +36,7 @@ pub(crate) fn run() -> Result<(), Error> {
         return Err(anyhow!("you must provide the data to stamp on stdin"));
     }
     let env = Env::inherit()?;
-    LogBuilder::from(&env).setup(&env, io::stderr());
+    LogBuilder::from(&env).setup(io::stderr());
 
     let mut sh = Sha1::new();
     io::copy(&mut io::stdin(), &mut sh)?;

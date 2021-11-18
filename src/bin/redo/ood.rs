@@ -36,7 +36,7 @@ pub(crate) fn run() -> Result<(), Error> {
 
     let targets: &[&RedoPath] = &[];
     let env = Env::init(targets)?;
-    LogBuilder::from(&env).setup(&env, io::stderr());
+    LogBuilder::from(&env).setup(io::stderr());
 
     let mut ps = ProcessState::init(env)?;
     let env2 = ps.env().clone();

@@ -27,7 +27,7 @@ use redo::{self, log_err, DepMode, Env, ProcessState, ProcessTransaction, EXIT_I
 /// Build the current target if these targets are created.
 pub(crate) fn run() -> Result<(), Error> {
     let env = Env::inherit()?;
-    LogBuilder::from(&env).setup(&env, io::stderr());
+    LogBuilder::from(&env).setup(io::stderr());
 
     let mut me = PathBuf::new();
     me.push(env.startdir());

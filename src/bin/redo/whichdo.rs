@@ -32,7 +32,7 @@ pub(crate) fn run() -> Result<(), Error> {
     }
 
     let env = Env::init_no_state()?;
-    LogBuilder::from(&env).setup(&env, io::stderr());
+    LogBuilder::from(&env).setup(io::stderr());
 
     let want = env::args_os().nth(1).unwrap();
     if want.is_empty() {

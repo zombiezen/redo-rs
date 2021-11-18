@@ -236,7 +236,7 @@ fn run_redo() -> Result<(), Error> {
                 .start(ps.env())?,
         );
     } else {
-        LogBuilder::from(ps.env()).setup(ps.env(), io::stderr());
+        LogBuilder::from(ps.env()).setup(io::stderr());
     }
     if (ps.is_toplevel() || j > 1) && ps.env().locks_broken() {
         log_warn!("detected broken fcntl locks; parallelism disabled.\n");

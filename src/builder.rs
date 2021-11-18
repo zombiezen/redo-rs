@@ -1024,11 +1024,11 @@ impl StdinLogReaderBuilder {
                 unistd::dup2(w, 1).map_err(RedoError::opaque_error)?;
                 unistd::dup2(w, 2).map_err(RedoError::opaque_error)?;
                 unistd::close(w).map_err(RedoError::opaque_error)?;
-                LogBuilder::new()
+                LogBuilder::from(e)
                     .parent_logs(true)
                     .pretty(false)
                     .disable_color()
-                    .setup(e, io::stderr());
+                    .setup(io::stderr());
                 Ok(StdinLogReader { pid, stderr_fd })
             }
             ForkResult::Child => {

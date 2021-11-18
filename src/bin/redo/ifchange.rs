@@ -27,7 +27,7 @@ use redo::{
     ProcessTransaction, RedoError, RedoPath, RedoPathBuf,
 };
 
-pub(crate) fn run() -> Result<(), failure::Error> {
+pub(crate) fn run() -> Result<(), anyhow::Error> {
     use std::convert::TryFrom;
 
     let mut targets = {

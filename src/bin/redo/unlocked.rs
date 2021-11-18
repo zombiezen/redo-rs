@@ -17,7 +17,7 @@
 
 //! Internal tool for building dependencies.
 
-use failure::{format_err, Error};
+use anyhow::{anyhow, Error};
 use std::env;
 use std::ffi::OsString;
 use std::io;
@@ -29,7 +29,7 @@ use redo::{self, Env, EXIT_FAILURE};
 pub(crate) fn run() -> Result<(), Error> {
     let mut args = env::args_os();
     if args.len() < 3 {
-        return Err(format_err!("at least 2 arguments expected."));
+        return Err(anyhow!("at least 2 arguments expected."));
     }
     let env = Env::inherit()?;
     LogBuilder::from(&env).setup(&env, io::stderr());

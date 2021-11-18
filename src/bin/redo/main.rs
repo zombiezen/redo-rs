@@ -26,8 +26,8 @@ mod targets;
 mod unlocked;
 mod whichdo;
 
+use anyhow::{anyhow, Error};
 use clap::{crate_version, App, AppSettings, Arg};
-use failure::{format_err, Error};
 use rusqlite::TransactionBehavior;
 use std::convert::Infallible;
 use std::env;
@@ -68,23 +68,20 @@ fn main() {
     match result {
         Ok(_) => std::process::exit(EXIT_SUCCESS),
         Err(e) => {
-            if let Some(bt) = e
-                .iter_chain()
-                .filter_map(|f| f.backtrace().filter(|bt| !bt.is_empty()))
-                .last()
-            {
-                eprint!("Backtrace:\n{}\n\n", bt);
-            }
-            let msg = e.iter_chain().fold(String::new(), |mut s, e| {
+            let msg = {
                 use std::fmt::Write;
-                if !s.is_empty() {
-                    write!(s, ": ").unwrap();
+
+                let mut s = String::new();
+                for e in e.chain() {
+                    if !s.is_empty() {
+                        write!(s, ": ").unwrap();
+                    }
+                    write!(s, "{}", e).unwrap();
                 }
-                write!(s, "{}", e).unwrap();
                 s
-            });
-            log_err!("{}: {}", name.to_string_lossy(), msg);
-            let retcode = match RedoErrorKind::of(&e.compat()) {
+            };
+            log_err!("{}", msg);
+            let retcode = match RedoErrorKind::of(&e) {
                 RedoErrorKind::FailedInAnotherThread { .. } => EXIT_FAILED_IN_ANOTHER_THREAD,
                 RedoErrorKind::InvalidTarget(_) => EXIT_INVALID_TARGET,
                 RedoErrorKind::CyclicDependency => EXIT_CYCLIC_DEPENDENCY,
@@ -265,7 +262,7 @@ fn run_redo() -> Result<(), Error> {
     }
 
     if j < 0 || j > 1000 {
-        return Err(format_err!("invalid --jobs value: {}", j));
+        return Err(anyhow!("invalid --jobs value: {}", j));
     }
     let mut server = JobServer::setup(j)?;
     assert!(ps.is_flushed());

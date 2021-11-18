@@ -15,7 +15,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use failure::{format_err, Error};
+use anyhow::{anyhow, Error};
 use rusqlite::TransactionBehavior;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -42,13 +42,13 @@ pub(crate) fn run() -> Result<(), Error> {
             process::exit(EXIT_INVALID_TARGET);
         }
         if Path::new(&t).exists() {
-            return Err(format_err!("{:?} already exists", t));
+            return Err(anyhow!("{:?} already exists", t));
         }
         f.add_dep(
             &mut ptx,
             DepMode::Created,
             t.to_str()
-                .ok_or_else(|| format_err!("cannot use {:?} as target name", &t))?,
+                .ok_or_else(|| anyhow!("cannot use {:?} as target name", &t))?,
         )?;
     }
     ptx.commit()?;

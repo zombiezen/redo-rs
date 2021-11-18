@@ -15,7 +15,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use failure::{format_err, Error};
+use anyhow::{anyhow, Error};
 use nix::unistd;
 use rusqlite::TransactionBehavior;
 use sha1::Sha1;
@@ -30,10 +30,10 @@ pub(crate) fn run() -> Result<(), Error> {
     use sha1::Digest;
 
     if env::args_os().len() != 1 {
-        return Err(format_err!("no arguments expected."));
+        return Err(anyhow!("no arguments expected."));
     }
     if unistd::isatty(0).unwrap_or(false) {
-        return Err(format_err!("you must provide the data to stamp on stdin"));
+        return Err(anyhow!("you must provide the data to stamp on stdin"));
     }
     let env = Env::inherit()?;
     LogBuilder::from(&env).setup(&env, io::stderr());

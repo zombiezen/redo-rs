@@ -15,7 +15,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use failure::Error;
+use anyhow::Error;
 use rusqlite::TransactionBehavior;
 use std::io;
 use std::path::PathBuf;

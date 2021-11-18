@@ -49,7 +49,7 @@ impl RedoError {
     pub(crate) fn opaque_error<E: Display>(e: E) -> RedoError {
         RedoError {
             kind: RedoErrorKind::default(),
-            msg: Cow::Owned(format!("redo: {}", e)),
+            msg: Cow::Owned(e.to_string()),
             cause: None,
         }
     }
@@ -115,8 +115,8 @@ pub enum RedoErrorKind {
 impl RedoErrorKind {
     /// Returns the first non-[`RedoErrorKind::Generic`] error kind in the error chain or
     /// [`RedoErrorKind::Generic`]
-    pub fn of<E: Error + 'static>(e: &E) -> &RedoErrorKind {
-        let mut next: Option<&(dyn Error + 'static)> = Some(e);
+    pub fn of<'a, E: AsRef<dyn Error + 'static>>(e: &'a E) -> &'a RedoErrorKind {
+        let mut next: Option<&(dyn Error + 'static)> = Some(e.as_ref());
         while let Some(e) = next {
             next = e.source();
             let kind = match e.downcast_ref::<RedoError>() {

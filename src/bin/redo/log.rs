@@ -15,8 +15,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::{anyhow, Error};
 use clap::{crate_version, App, Arg, ArgMatches};
-use failure::{format_err, Error};
 use nix::unistd::{self, Pid};
 use rusqlite::TransactionBehavior;
 use std::cmp;
@@ -40,7 +40,7 @@ use redo::{
 use super::{auto_bool_arg, log_flags};
 
 pub(crate) fn run() -> Result<(), Error> {
-    use failure::ResultExt;
+    use anyhow::Context;
     use std::io::Write;
     use std::os::unix::io::FromRawFd;
 
@@ -107,7 +107,7 @@ pub(crate) fn run() -> Result<(), Error> {
                 rel(&topdir, ".", t)?
                     .as_os_str()
                     .to_str()
-                    .ok_or(format_err!("cannot format target as string"))?,
+                    .ok_or(anyhow!("cannot format target as string"))?,
                 Some(Pid::from_raw(0)),
             );
         }

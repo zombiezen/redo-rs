@@ -17,7 +17,7 @@
 
 //! List the known source (not target) files.
 
-use failure::{format_err, Error};
+use anyhow::{anyhow, Error};
 use rusqlite::TransactionBehavior;
 use std::env;
 use std::io;
@@ -27,7 +27,7 @@ use redo::{self, Env, Files, ProcessState, ProcessTransaction, RedoPath};
 
 pub(crate) fn run() -> Result<(), Error> {
     if env::args_os().len() != 1 {
-        return Err(format_err!("no arguments expected."));
+        return Err(anyhow!("no arguments expected."));
     }
 
     let targets: &[&RedoPath] = &[];
@@ -46,7 +46,7 @@ pub(crate) fn run() -> Result<(), Error> {
                 "{}",
                 p.as_os_str()
                     .to_str()
-                    .ok_or(format_err!("could not get filename as UTF-8"))?
+                    .ok_or(anyhow!("could not get filename as UTF-8"))?
             );
         }
     }

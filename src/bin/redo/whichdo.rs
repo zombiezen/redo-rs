@@ -17,7 +17,7 @@
 
 //! List the set of .do files considered to build a target.
 
-use failure::{format_err, Error};
+use anyhow::{anyhow, Error};
 use std::env;
 use std::io;
 use std::path::Path;
@@ -28,7 +28,7 @@ use redo::{self, log_err, Env, EXIT_INVALID_TARGET};
 
 pub(crate) fn run() -> Result<(), Error> {
     if env::args_os().len() != 2 {
-        return Err(format_err!("exactly one argument expected."));
+        return Err(anyhow!("exactly one argument expected."));
     }
 
     let env = Env::init_no_state()?;
@@ -51,7 +51,7 @@ pub(crate) fn run() -> Result<(), Error> {
         }
     }
 
-    Err(format_err!(
+    Err(anyhow!(
         "no appropriate dofile found for {}",
         env::args().nth(1).unwrap()
     ))

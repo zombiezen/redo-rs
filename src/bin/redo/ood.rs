@@ -17,7 +17,7 @@
 
 //! List out-of-date targets (ood) targets.
 
-use failure::{format_err, Error};
+use anyhow::{anyhow, Error};
 use rusqlite::TransactionBehavior;
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -31,7 +31,7 @@ use redo::{
 
 pub(crate) fn run() -> Result<(), Error> {
     if env::args_os().len() != 1 {
-        return Err(format_err!("no arguments expected."));
+        return Err(anyhow!("no arguments expected."));
     }
 
     let targets: &[&RedoPath] = &[];
@@ -65,7 +65,7 @@ pub(crate) fn run() -> Result<(), Error> {
                 "{}",
                 p.as_os_str()
                     .to_str()
-                    .ok_or(format_err!("could not get filename as UTF-8"))?
+                    .ok_or(anyhow!("could not get filename as UTF-8"))?
             );
         }
     }

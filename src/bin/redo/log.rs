@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 
 use redo::logs::{self, LogBuilder, Meta};
 use redo::{
-    self, Env, Lock, LockType, ProcessState, ProcessTransaction, RedoPath, EXIT_FAILURE,
-    EXIT_UNKNOWN_TARGET,
+    self, Env, Lock, LockType, ProcessState, ProcessTransaction, RedoErrorKind, RedoPath,
+    EXIT_FAILURE, EXIT_UNKNOWN_TARGET,
 };
 
 use super::{auto_bool_arg, log_flags};
@@ -165,7 +165,7 @@ impl LogState {
                     let mut ptx = ProcessTransaction::new(ps, TransactionBehavior::Deferred)?;
                     match redo::File::from_name(&mut ptx, t, false) {
                         Ok(sf) => sf.id(),
-                        Err(e) if e.kind().is_not_found() => {
+                        Err(e) if e.kind() == &RedoErrorKind::FileNotFound => {
                             eprintln!(
                                 "redo-log: [{}] {:?}: not known to redo.",
                                 env::current_dir()?.as_os_str().to_string_lossy(),

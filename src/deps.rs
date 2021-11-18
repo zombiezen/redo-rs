@@ -17,12 +17,12 @@
 
 //! Code for checking redo target dependencies.
 
-use failure::{format_err, Error};
 use std::cmp;
 use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 
 use super::env::Env;
+use super::error::{RedoError, RedoErrorKind};
 use super::helpers::RedoPath;
 use super::state::{self, DepMode, File, ProcessTransaction, Stamp};
 
@@ -31,12 +31,12 @@ pub fn is_dirty(
     ptx: &mut ProcessTransaction,
     f: &mut File,
     cb: &mut DirtyCallbacks,
-) -> Result<Dirtiness, Error> {
+) -> Result<Dirtiness, RedoError> {
     let runid = ptx
         .state()
         .env()
         .runid
-        .ok_or_else(|| format_err!("RUNID not set"))?;
+        .ok_or_else(|| RedoError::new("RUNID not set"))?;
     private_is_dirty(
         ptx,
         MutOrOwned::MutBorrowed(f),
@@ -62,9 +62,9 @@ fn private_is_dirty(
     max_changed: i64,
     already_checked: &HashSet<i64>,
     cb: &mut DirtyCallbacks,
-) -> Result<Dirtiness, Error> {
+) -> Result<Dirtiness, RedoError> {
     if already_checked.contains(&f.id()) {
-        return Err(format_err!("cyclic dependency"));
+        return Err(RedoErrorKind::CyclicDependency.into());
     }
     let already_checked = {
         let mut already_checked = already_checked.clone();
@@ -267,7 +267,8 @@ impl Default for Dirtiness {
 /// Hooks for the [`is_dirty`] function.
 pub struct DirtyCallbacks<'a> {
     is_checked: Box<dyn Fn(&File, &Env) -> bool + 'a>,
-    set_checked: Box<dyn FnMut(&mut File, &mut ProcessTransaction<'_>) -> Result<(), Error> + 'a>,
+    set_checked:
+        Box<dyn FnMut(&mut File, &mut ProcessTransaction<'_>) -> Result<(), RedoError> + 'a>,
     log_override: Box<dyn Fn(&RedoPath) + 'a>,
 }
 
@@ -310,7 +311,7 @@ impl<'a> DirtyCallbacksBuilder<'a> {
     /// Sets the `set_checked` callback.
     #[inline]
     pub fn set_checked<
-        F: FnMut(&mut File, &mut ProcessTransaction<'_>) -> Result<(), Error> + 'a,
+        F: FnMut(&mut File, &mut ProcessTransaction<'_>) -> Result<(), RedoError> + 'a,
     >(
         mut self,
         f: F,

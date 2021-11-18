@@ -34,6 +34,8 @@ use std::path::{self, Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
+use super::error::{RedoError, RedoErrorKind};
+
 /// A slice of a path (akin to [`str`]).
 ///
 /// This type guarantees that the path contains no nul bytes or newline bytes
@@ -534,6 +536,14 @@ impl Display for RedoPathError {
 }
 
 impl std::error::Error for RedoPathError {}
+
+impl From<RedoPathError> for RedoError {
+    fn from(e: RedoPathError) -> RedoError {
+        let msg = e.to_string();
+        let input = e.input.clone();
+        RedoError::wrap(e, msg).with_kind(RedoErrorKind::InvalidTarget(input))
+    }
+}
 
 pub(crate) fn close_on_exec(fd: RawFd, yes: bool) -> nix::Result<()> {
     let result = fcntl::fcntl(fd, FcntlArg::F_GETFD)?;

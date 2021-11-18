@@ -130,6 +130,6 @@ pub use helpers::{abs_path, normpath, RedoPath, RedoPathBuf};
 pub use jobserver::JobServer;
 pub use paths::{possible_do_files, DoFile, PossibleDoFiles};
 pub use state::{
-    always_filename, logname, relpath, DepMode, File, FileError, FileErrorKind, Files, Lock,
-    LockType, ProcessState, ProcessTransaction, Stamp, LOG_LOCK_MAGIC,
+    always_filename, logname, relpath, DepMode, File, Files, Lock, LockType, ProcessState,
+    ProcessTransaction, Stamp, LOG_LOCK_MAGIC,
 };

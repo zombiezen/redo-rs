@@ -97,6 +97,7 @@ impl From<RedoErrorKind> for RedoError {
     }
 }
 
+/// Classification of a [`RedoError`].
 #[derive(Clone, Eq, PartialEq, Debug)]
 #[non_exhaustive]
 pub enum RedoErrorKind {
@@ -104,6 +105,7 @@ pub enum RedoErrorKind {
     FailedInAnotherThread { target: RedoPathBuf },
     InvalidTarget(OsString),
     CyclicDependency,
+    FileNotFound,
 }
 
 impl RedoErrorKind {
@@ -141,6 +143,7 @@ impl Display for RedoErrorKind {
             }
             RedoErrorKind::InvalidTarget(target) => write!(f, "invalid target {:?}", target),
             RedoErrorKind::CyclicDependency => f.write_str("cyclic dependency detected"),
+            RedoErrorKind::FileNotFound => f.write_str("file not found"),
         }
     }
 }

@@ -15,7 +15,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use failure::{format_err, Backtrace, Context, Error, Fail, ResultExt};
 use libc::{self, c_short, flock, off_t};
 use libsqlite3_sys;
 use nix;
@@ -35,7 +34,6 @@ use std::cmp;
 use std::collections::HashSet;
 use std::env;
 use std::ffi::OsStr;
-use std::fmt::{self, Display, Formatter};
 use std::fs::{self, Metadata, OpenOptions};
 use std::io;
 use std::iter::FusedIterator;
@@ -51,7 +49,7 @@ use std::time::{Duration, SystemTime};
 use super::builder::BuildError;
 use super::cycles;
 use super::env::Env;
-use super::error::RedoError;
+use super::error::{RedoError, RedoErrorKind};
 use super::exits::*;
 use super::helpers::{self, RedoPath, RedoPathBuf};
 
@@ -86,7 +84,7 @@ pub struct ProcessTransaction<'a> {
 }
 
 impl ProcessState {
-    pub fn init(mut e: Env) -> Result<ProcessState, Error> {
+    pub fn init(mut e: Env) -> Result<ProcessState, RedoError> {
         let dbdir = {
             let mut dbdir = PathBuf::from(e.base());
             dbdir.push(".redo");
@@ -94,9 +92,7 @@ impl ProcessState {
         };
         if let Err(err) = fs::create_dir(&dbdir) {
             if err.kind() != io::ErrorKind::AlreadyExists {
-                return Err(Error::from(err)
-                    .context("Could not create database directory")
-                    .into());
+                return Err(RedoError::wrap(err, "Could not create database directory"));
             }
         }
         let lockfile = {
@@ -117,37 +113,39 @@ impl ProcessState {
         let mut db: Connection;
         {
             let tx = if !must_create {
-                db = connect(&e, &dbfile).with_context(|e| format!("could not connect: {}", e))?;
-                let tx = db.transaction()?;
+                db = connect(&e, &dbfile)
+                    .map_err(|e| RedoError::new(format!("could not connect: {}", e)))?;
+                let tx = db.transaction().map_err(RedoError::opaque_error)?;
                 let ver: Option<i32> = tx
                     .query_row("select version from Schema", NO_PARAMS, |row| row.get(0))
                     .optional()
-                    .context("schema version check failed")?;
+                    .map_err(|e| RedoError::wrap(e, "schema version check failed"))?;
                 if ver != Some(SCHEMA_VER) {
-                    return Err(format_err!(
+                    return Err(RedoError::new(format!(
                         "{}: found v{} (expected v{})\nmanually delete .redo dir to start over.",
                         dbfile.to_string_lossy(),
                         ver.unwrap_or(0),
                         SCHEMA_VER
-                    ));
+                    )));
                 }
                 tx
             } else {
-                helpers::unlink(&dbfile)?;
-                db = connect(&e, &dbfile).with_context(|e| format!("could not connect: {}", e))?;
-                let tx = db.transaction()?;
+                helpers::unlink(&dbfile).map_err(RedoError::opaque_error)?;
+                db = connect(&e, &dbfile)
+                    .map_err(|e| RedoError::new(format!("could not connect: {}", e)))?;
+                let tx = db.transaction().map_err(RedoError::opaque_error)?;
                 tx.execute(
                     "create table Schema \
                         (version int)",
                     NO_PARAMS,
                 )
-                .context("create table Schema")?;
+                .map_err(|e| RedoError::wrap(e, "failed to create table Schema"))?;
                 tx.execute(
                     "create table Runid \
                         (id integer primary key autoincrement)",
                     NO_PARAMS,
                 )
-                .context("create table Runid")?;
+                .map_err(|e| RedoError::wrap(e, "failed to create table Runid"))?;
                 tx.execute(
                     "create table Files \
                         (name not null primary key, \
@@ -160,7 +158,7 @@ impl ProcessState {
                         csum)",
                     NO_PARAMS,
                 )
-                .context("create table Files")?;
+                .map_err(|e| RedoError::wrap(e, "failed to create table Files"))?;
                 tx.execute(
                     "create table Deps \
                         (target int, \
@@ -170,20 +168,20 @@ impl ProcessState {
                         primary key (target, source))",
                     NO_PARAMS,
                 )
-                .context("create table Deps")?;
+                .map_err(|e| RedoError::wrap(e, "failed to create table Deps"))?;
                 tx.execute(
                     "insert into Schema (version) values (?)",
                     params![SCHEMA_VER],
                 )
-                .context("create table Schema")?;
+                .map_err(|e| RedoError::wrap(e, "failed to create table Schema"))?;
                 // eat the '0' runid and File id.
                 // Because of the cheesy way t/flush-cache is implemented, leave a
                 // lot of runids available before the "first" one so that we
                 // can adjust cached values to be before the first value.
                 tx.execute("insert into Runid values (1000000000)", NO_PARAMS)
-                    .context("insert initial Runid")?;
+                    .map_err(|e| RedoError::wrap(e, "failed to insert initial Runid"))?;
                 tx.execute("insert into Files (name) values (?)", params![ALWAYS])
-                    .context("insert ALWAYS file")?;
+                    .map_err(|e| RedoError::wrap(e, "failed to insert ALWAYS file"))?;
                 tx
             };
 
@@ -193,14 +191,14 @@ impl ProcessState {
                         ((select max(id)+1 from Runid))",
                     NO_PARAMS,
                 )
-                .context("insert into Runid")?;
+                .map_err(|e| RedoError::wrap(e, "failed to insert new Runid"))?;
                 e.fill_runid(
                     tx.query_row("select last_insert_rowid()", NO_PARAMS, |row| row.get(0))
-                        .context("read runid")?,
+                        .map_err(|e| RedoError::wrap(e, "failed to read runid"))?,
                 );
             }
 
-            tx.commit().context("Commit database setup")?;
+            tx.commit().map_err(RedoError::opaque_error)?;
         }
 
         Ok(ProcessState {
@@ -388,7 +386,7 @@ impl File {
         ptx: &mut ProcessTransaction,
         name: &'a P,
         allow_add: bool,
-    ) -> Result<File, FileError> {
+    ) -> Result<File, RedoError> {
         let name = name.as_ref();
         let q = format!("select {} from Files where name=?", FILE_COLS);
         let normalized_name: Cow<str> = if name == OsStr::new(ALWAYS) {
@@ -396,7 +394,7 @@ impl File {
         } else {
             Cow::Owned(
                 relpath(name, &ptx.state().env().base())
-                    .context(FileErrorKind::Generic)?
+                    .map_err(RedoError::opaque_error)?
                     .to_string_lossy()
                     .into_owned(),
             )
@@ -408,11 +406,12 @@ impl File {
                 File::from_cols(&ptx.state().env, row)
             }) {
             Ok(f) => Ok(f),
-            Err(e @ rusqlite::Error::QueryReturnedNoRows) => {
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
                 if !allow_add {
-                    return Err(e
-                        .context(FileErrorKind::NameNotFound(normalized_name.into_owned()))
-                        .into());
+                    return Err(
+                        RedoError::new(format!("no file with name={:?}", normalized_name))
+                            .with_kind(RedoErrorKind::FileNotFound),
+                    );
                 }
                 match ptx.write(
                     "insert into Files (name) values (?)",
@@ -430,7 +429,7 @@ impl File {
                         // big deal.
                     }
                     Err(e) => {
-                        return Err(e.context(FileErrorKind::Generic).into());
+                        return Err(RedoError::opaque_error(e));
                     }
                 }
                 Ok(ptx
@@ -439,22 +438,23 @@ impl File {
                     .query_row(q.as_str(), params!(&normalized_name), |row| {
                         File::from_cols(&ptx.state().env, row)
                     })
-                    .context(FileErrorKind::Generic)?)
+                    .map_err(RedoError::opaque_error)?)
             }
-            Err(e) => Err(e.context(FileErrorKind::Generic).into()),
+            Err(e) => Err(RedoError::opaque_error(e)),
         }
     }
 
-    pub(crate) fn from_id(ptx: &mut ProcessTransaction, id: i64) -> Result<File, Error> {
+    pub(crate) fn from_id(ptx: &mut ProcessTransaction, id: i64) -> Result<File, RedoError> {
         let q = format!("select {} from Files where rowid=?", FILE_COLS);
         match ptx.state().db.query_row(q.as_str(), params!(id), |row| {
             File::from_cols(&ptx.state().env, row)
         }) {
             Ok(f) => Ok(f),
-            Err(e @ rusqlite::Error::QueryReturnedNoRows) => {
-                Err(e.context(FileErrorKind::IDNotFound(id)).into())
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                Err(RedoError::new(format!("no file with id={:?}", id))
+                    .with_kind(RedoErrorKind::FileNotFound))
             }
-            Err(e) => Err(e.context(FileErrorKind::Generic).into()),
+            Err(e) => Err(RedoError::opaque_error(e)),
         }
     }
 
@@ -523,13 +523,13 @@ impl File {
         self.csum = csum;
     }
 
-    pub(crate) fn refresh(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
+    pub(crate) fn refresh(&mut self, ptx: &mut ProcessTransaction) -> Result<(), RedoError> {
         *self = File::from_id(ptx, self.id)?;
         Ok(())
     }
 
     /// Write the file to the database.
-    pub fn save(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
+    pub fn save(&mut self, ptx: &mut ProcessTransaction) -> Result<(), RedoError> {
         ptx.write(
             "update Files set is_generated=?, \
                               is_override=?, \
@@ -552,7 +552,8 @@ impl File {
                 },
                 self.id
             ),
-        )?;
+        )
+        .map_err(RedoError::opaque_error)?;
         Ok(())
     }
 
@@ -563,7 +564,7 @@ impl File {
     pub(crate) fn set_checked_save(
         &mut self,
         ptx: &mut ProcessTransaction<'_>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), RedoError> {
         self.set_checked(ptx.state().env());
         self.save(ptx)
     }
@@ -575,7 +576,7 @@ impl File {
         self.is_override = false;
     }
 
-    pub(crate) fn set_failed(&mut self, v: &Env) -> Result<(), Error> {
+    pub(crate) fn set_failed(&mut self, v: &Env) -> Result<(), RedoError> {
         log_debug2!("FAILED: {:?}\n", &self.name);
         self.update_stamp(v, false)?;
         self.failed_runid = v.runid;
@@ -593,7 +594,7 @@ impl File {
         Ok(())
     }
 
-    pub(crate) fn set_static(&mut self, v: &Env) -> Result<(), Error> {
+    pub(crate) fn set_static(&mut self, v: &Env) -> Result<(), RedoError> {
         self.update_stamp(v, true)?;
         self.failed_runid = None;
         self.is_override = false;
@@ -601,7 +602,7 @@ impl File {
         Ok(())
     }
 
-    pub(crate) fn set_override(&mut self, v: &Env) -> Result<(), Error> {
+    pub(crate) fn set_override(&mut self, v: &Env) -> Result<(), RedoError> {
         self.update_stamp(v, false)?;
         self.failed_runid = None;
         self.is_override = true;
@@ -613,10 +614,10 @@ impl File {
         self.stamp = Some(newstamp);
     }
 
-    pub(crate) fn update_stamp(&mut self, v: &Env, must_exist: bool) -> Result<(), Error> {
+    pub(crate) fn update_stamp(&mut self, v: &Env, must_exist: bool) -> Result<(), RedoError> {
         let newstamp = self.read_stamp(v)?;
         if must_exist && newstamp.is_missing() {
-            return Err(format_err!("{:?} does not exist", self.name));
+            return Err(RedoError::new(format!("{:?} does not exist", self.name)));
         }
         if self.stamp.as_ref() != Some(&newstamp) {
             log_debug2!(
@@ -632,7 +633,7 @@ impl File {
     }
 
     /// Reports if this object represents a source (not a target).
-    pub fn is_source(&self, v: &Env) -> Result<bool, Error> {
+    pub fn is_source(&self, v: &Env) -> Result<bool, RedoError> {
         if self.name.as_str().starts_with("//") {
             // Special name, ignore.
             return Ok(false);
@@ -655,7 +656,7 @@ impl File {
     }
 
     /// Reports if this object represents a target (not a source).
-    pub fn is_target(&self, v: &Env) -> Result<bool, Error> {
+    pub fn is_target(&self, v: &Env) -> Result<bool, RedoError> {
         if !self.is_generated {
             return Ok(false);
         }
@@ -685,23 +686,29 @@ impl File {
     }
 
     /// Return the list of objects that this object depends on.
-    pub(crate) fn deps(&self, ptx: &ProcessTransaction) -> Result<Vec<(DepMode, File)>, Error> {
+    pub(crate) fn deps(&self, ptx: &ProcessTransaction) -> Result<Vec<(DepMode, File)>, RedoError> {
         if self.is_override || !self.is_generated {
             return Ok(Vec::new());
         }
-        let mut stmt = ptx.state().db.prepare(&format!(
-            "select Deps.mode, Deps.source, {} \
+        let mut stmt = ptx
+            .state()
+            .db
+            .prepare(&format!(
+                "select Deps.mode, Deps.source, {} \
             from Files \
             join Deps on Files.rowid = Deps.source \
             where target=?",
-            FILE_COLS
-        ))?;
-        let mut rows = stmt.query(params!(self.id))?;
+                FILE_COLS
+            ))
+            .map_err(RedoError::opaque_error)?;
+        let mut rows = stmt
+            .query(params!(self.id))
+            .map_err(RedoError::opaque_error)?;
 
         let mut deps = Vec::new();
-        while let Some(row) = rows.next()? {
-            let mode: DepMode = row.get(0)?;
-            let f = File::from_cols(ptx.state().env(), row)?;
+        while let Some(row) = rows.next().map_err(RedoError::opaque_error)? {
+            let mode: DepMode = row.get(0).map_err(RedoError::opaque_error)?;
+            let f = File::from_cols(ptx.state().env(), row).map_err(RedoError::opaque_error)?;
             deps.push((mode, f));
         }
         Ok(deps)
@@ -712,12 +719,13 @@ impl File {
     /// We do this when starting a new build of the current target.  We don't
     /// delete them right away, because if the build fails, we still want to
     /// know the old deps.
-    pub(crate) fn zap_deps1(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
+    pub(crate) fn zap_deps1(&mut self, ptx: &mut ProcessTransaction) -> Result<(), RedoError> {
         log_debug2!("zap-deps1: {:?}\n", &self.name);
         ptx.write(
             "update Deps set delete_me=? where target=?",
             params!(true, self.id),
-        )?;
+        )
+        .map_err(RedoError::opaque_error)?;
         Ok(())
     }
 
@@ -725,12 +733,13 @@ impl File {
     ///
     /// Dependencies of a given target can change from one build to the next.
     /// We forget old dependencies only after a build completes successfully.
-    pub(crate) fn zap_deps2(&mut self, ptx: &mut ProcessTransaction) -> Result<(), Error> {
+    pub(crate) fn zap_deps2(&mut self, ptx: &mut ProcessTransaction) -> Result<(), RedoError> {
         log_debug2!("zap-deps2: {:?}\n", &self.name);
         ptx.write(
             "delete from Deps where target=? and delete_me=1",
             params!(self.id),
-        )?;
+        )
+        .map_err(RedoError::opaque_error)?;
         Ok(())
     }
 
@@ -740,7 +749,7 @@ impl File {
         ptx: &mut ProcessTransaction,
         mode: DepMode,
         dep: &'a P,
-    ) -> Result<(), Error> {
+    ) -> Result<(), RedoError> {
         let src = File::from_name(ptx, dep, true)?;
         log_debug3!(
             "add-dep: \"{}\" < {:?} \"{}\"\n",
@@ -752,15 +761,15 @@ impl File {
         ptx.write(
             "insert or replace into Deps (target, mode, source, delete_me) values (?,?,?,?)",
             params!(self.id, mode, src.id, false),
-        )?;
+        )
+        .map_err(RedoError::opaque_error)?;
         Ok(())
     }
 
-    fn read_stamp_st<F: FnOnce(&Path) -> io::Result<Metadata>>(
-        &self,
-        v: &Env,
-        statfunc: F,
-    ) -> Result<(bool, Stamp), Error> {
+    fn read_stamp_st<F>(&self, v: &Env, statfunc: F) -> Result<(bool, Stamp), RedoError>
+    where
+        F: FnOnce(&Path) -> io::Result<Metadata>,
+    {
         match statfunc(&v.base().join(&self.name)) {
             Ok(metadata) => Ok((
                 metadata.file_type().is_symlink(),
@@ -770,13 +779,13 @@ impl File {
                 if e.kind() == io::ErrorKind::NotFound {
                     Ok((false, Stamp::MISSING))
                 } else {
-                    Err(e.into())
+                    Err(RedoError::opaque_error(e))
                 }
             }
         }
     }
 
-    pub(crate) fn read_stamp(&self, v: &Env) -> Result<Stamp, Error> {
+    pub(crate) fn read_stamp(&self, v: &Env) -> Result<Stamp, RedoError> {
         let (is_link, pre) = self.read_stamp_st(v, |p| fs::symlink_metadata(p))?;
         Ok(if is_link {
             // if we're a symlink, we actually care about the link object
@@ -792,8 +801,9 @@ impl File {
         })
     }
 
-    pub fn nice_name(&self, v: &Env) -> Result<String, Error> {
-        Ok(relpath(v.base().join(&self.name), &v.startdir)?
+    pub fn nice_name(&self, v: &Env) -> Result<String, RedoError> {
+        Ok(relpath(v.base().join(&self.name), &v.startdir)
+            .map_err(RedoError::opaque_error)?
             .to_string_lossy()
             .into_owned())
     }
@@ -817,7 +827,7 @@ impl Files<'_> {
             Ok(stmt) => stmt,
             Err(e) => {
                 return Files {
-                    state: FilesState::Error(e.into()),
+                    state: FilesState::Error(RedoError::opaque_error(e)),
                     runid,
                 }
             }
@@ -833,7 +843,7 @@ impl Files<'_> {
                 runid,
             },
             Err(e) => Files {
-                state: FilesState::Error(e.into()),
+                state: FilesState::Error(RedoError::opaque_error(e)),
                 runid,
             },
         }
@@ -841,17 +851,18 @@ impl Files<'_> {
 }
 
 impl Iterator for Files<'_> {
-    type Item = Result<File, Error>;
+    type Item = Result<File, RedoError>;
 
-    fn next(&mut self) -> Option<Result<File, Error>> {
+    fn next(&mut self) -> Option<Result<File, RedoError>> {
         let mut state = FilesState::Done;
         mem::swap(&mut state, &mut self.state);
         match state {
             FilesState::Rows(mut rows) => {
-                let res = rows.with_rows_mut(|rows| -> Result<Option<File>, Error> {
-                    match rows.next()? {
+                let res = rows.with_rows_mut(|rows| -> Result<Option<File>, RedoError> {
+                    match rows.next().map_err(RedoError::opaque_error)? {
                         Some(row) => {
-                            let f = File::from_cols_with_runid(row, self.runid)?;
+                            let f = File::from_cols_with_runid(row, self.runid)
+                                .map_err(RedoError::opaque_error)?;
                             Ok(Some(f))
                         }
                         None => Ok(None),
@@ -876,7 +887,7 @@ impl FusedIterator for Files<'_> {}
 
 enum FilesState<'tx> {
     Rows(FilesRows<'tx>),
-    Error(Error),
+    Error(RedoError),
     Done,
 }
 
@@ -886,78 +897,6 @@ struct FilesRows<'tx> {
     #[borrows(mut stmt)]
     #[covariant]
     rows: Rows<'this>,
-}
-
-/// Kinds of file errors.
-#[derive(Clone, Eq, PartialEq, Debug, Fail)]
-#[non_exhaustive]
-pub enum FileErrorKind {
-    #[fail(display = "redo file error")]
-    Generic,
-    #[fail(display = "No file with name={:?}", _0)]
-    NameNotFound(String),
-    #[fail(display = "No file with id={:?}", _0)]
-    IDNotFound(i64),
-}
-
-impl FileErrorKind {
-    #[inline]
-    pub fn is_not_found(&self) -> bool {
-        match self {
-            FileErrorKind::NameNotFound(_) | FileErrorKind::IDNotFound(_) => true,
-            _ => false,
-        }
-    }
-}
-
-impl Default for FileErrorKind {
-    #[inline]
-    fn default() -> FileErrorKind {
-        FileErrorKind::Generic
-    }
-}
-
-/// Errors related to file entries in the redo database.
-#[derive(Debug)]
-pub struct FileError {
-    inner: Context<FileErrorKind>,
-}
-
-impl FileError {
-    #[inline]
-    pub fn kind(&self) -> &FileErrorKind {
-        self.inner.get_context()
-    }
-}
-
-impl Fail for FileError {
-    fn cause(&self) -> Option<&dyn Fail> {
-        self.inner.cause()
-    }
-
-    fn backtrace(&self) -> Option<&Backtrace> {
-        self.inner.backtrace()
-    }
-}
-
-impl Display for FileError {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        Display::fmt(&self.inner, f)
-    }
-}
-
-impl From<FileErrorKind> for FileError {
-    fn from(kind: FileErrorKind) -> FileError {
-        FileError {
-            inner: Context::new(kind),
-        }
-    }
-}
-
-impl From<Context<FileErrorKind>> for FileError {
-    fn from(inner: Context<FileErrorKind>) -> FileError {
-        FileError { inner }
-    }
 }
 
 /// Given the ID of a `File`, return the filename of its build log.
@@ -1016,11 +955,16 @@ impl From<DepMode> for &'static str {
 impl FromSql for DepMode {
     fn column_result(value: ValueRef) -> FromSqlResult<DepMode> {
         match value {
-            ValueRef::Text(&[c]) => DepMode::from_char(c)
-                .ok_or_else(|| FromSqlError::Other(format_err!("unknown dep mode {:?}", c).into())),
-            ValueRef::Text(s) => Err(FromSqlError::Other(
-                format_err!("unknown dep mode {:?}", s).into(),
-            )),
+            ValueRef::Text(&[c]) => DepMode::from_char(c).ok_or_else(|| {
+                FromSqlError::Other(Box::new(RedoError::new(format!(
+                    "unknown dep mode {:?}",
+                    c
+                ))))
+            }),
+            ValueRef::Text(s) => Err(FromSqlError::Other(Box::new(RedoError::new(format!(
+                "unknown dep mode {:?}",
+                s
+            ))))),
             _ => Err(FromSqlError::InvalidType),
         }
     }
@@ -1045,7 +989,7 @@ impl Stamp {
     /// The stamp of a nonexistent file.
     pub const MISSING: Stamp = Stamp(Cow::Borrowed("0"));
 
-    fn from_metadata(metadata: &fs::Metadata) -> Result<Stamp, Error> {
+    fn from_metadata(metadata: &fs::Metadata) -> Result<Stamp, RedoError> {
         use std::os::unix::fs::MetadataExt;
 
         if metadata.is_dir() {
@@ -1054,8 +998,10 @@ impl Stamp {
         }
         // A "unique identifier" stamp for a regular file.
         let mtime = metadata
-            .modified()?
-            .duration_since(SystemTime::UNIX_EPOCH)?
+            .modified()
+            .map_err(RedoError::opaque_error)?
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(RedoError::opaque_error)?
             .as_secs_f64();
         Ok(Stamp(Cow::Owned(format!(
             "{:.6}-{}-{}-{}-{}-{}",
@@ -1132,13 +1078,14 @@ pub(crate) struct LockManager {
 }
 
 impl LockManager {
-    pub(crate) fn open<P: AsRef<Path>>(path: P) -> Result<Rc<LockManager>, Error> {
+    pub(crate) fn open<P: AsRef<Path>>(path: P) -> Result<Rc<LockManager>, RedoError> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(path)?;
-        helpers::close_on_exec(file.as_raw_fd(), true)?;
+            .open(path)
+            .map_err(RedoError::opaque_error)?;
+        helpers::close_on_exec(file.as_raw_fd(), true).map_err(RedoError::opaque_error)?;
         Ok(Rc::new(LockManager {
             file,
             locks: RefCell::new(HashSet::new()),
@@ -1154,7 +1101,7 @@ impl LockManager {
     /// Bug exists at least in WSL "4.4.0-17134-Microsoft #471-Microsoft".
     ///
     /// Returns `true` if broken, `false` otherwise.
-    pub(crate) fn detect_broken_locks(manager: Rc<LockManager>) -> Result<bool, Error> {
+    pub(crate) fn detect_broken_locks(manager: Rc<LockManager>) -> Result<bool, RedoError> {
         let child_manager_ref = manager.clone();
         let mut pl = Lock::new(manager, 0);
         // We wait for the lock here, just in case others are doing
@@ -1164,7 +1111,7 @@ impl LockManager {
             Ok(ForkResult::Parent { child: pid }) => match wait::waitpid(pid, None) {
                 Ok(WaitStatus::Exited(_, status)) => Ok(status != EXIT_SUCCESS),
                 Ok(_) => Ok(true),
-                Err(e) => Err(e.into()),
+                Err(e) => Err(RedoError::wrap(e, "could not check for broken locks")),
             },
             Ok(ForkResult::Child) => {
                 // Doesn't actually unlock, since child process doesn't own it.
@@ -1189,7 +1136,7 @@ impl LockManager {
                     }
                 }
             }
-            Err(e) => Err(e.into()),
+            Err(e) => Err(RedoError::wrap(e, "could not check for broken locks")),
         }
     }
 }
@@ -1252,6 +1199,8 @@ impl Lock {
 
     /// Non-blocking try to acquire our lock; returns true if it worked.
     pub fn try_lock(&mut self) -> Result<bool, RedoError> {
+        use failure::Fail;
+
         // TODO(soon): Don't make opaque.
         self.check()
             .map_err(|e| RedoError::opaque_error(e.compat()))?;
@@ -1274,6 +1223,8 @@ impl Lock {
 
     /// Try to acquire our lock, and wait if it's currently locked.
     pub fn wait_lock(&mut self, lock_type: LockType) -> Result<(), RedoError> {
+        use failure::Fail;
+
         // TODO(soon): Don't make opaque.
         self.check()
             .map_err(|e| RedoError::opaque_error(e.compat()))?;
@@ -1369,10 +1320,10 @@ pub fn relpath<P1: AsRef<Path>, P2: AsRef<Path>>(t: P1, base: P2) -> io::Result<
 /// TARGET relative to that, then find t relative to that.
 ///
 /// FIXME: find some cleaner terminology for all these different paths.
-pub(crate) fn target_relpath<P: AsRef<Path>>(env: &Env, t: P) -> Result<RedoPathBuf, Error> {
+pub(crate) fn target_relpath<P: AsRef<Path>>(env: &Env, t: P) -> Result<RedoPathBuf, RedoError> {
     use std::convert::TryFrom;
 
-    let cwd = std::env::current_dir()?;
+    let cwd = std::env::current_dir().map_err(RedoError::opaque_error)?;
     let rel_dofile_dir = env.startdir().join(env.pwd());
     let dofile_dir = helpers::abs_path(&cwd, &rel_dofile_dir);
     let target_dir = if env.target().as_os_str().is_empty() {
@@ -1382,15 +1333,20 @@ pub(crate) fn target_relpath<P: AsRef<Path>>(env: &Env, t: P) -> Result<RedoPath
             .join(env.target())
             .parent()
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid target path (no directory)",
-                )
+                RedoError::new(format!(
+                    "invalid target path {:?} (no directory)",
+                    env.target()
+                ))
+                .with_kind(RedoErrorKind::InvalidTarget(
+                    env.target().as_os_str().to_os_string(),
+                ))
             })?
             .to_path_buf()
     };
     let target_dir = helpers::abs_path(&cwd, &target_dir);
-    Ok(RedoPathBuf::try_from(relpath(t, target_dir)?)?)
+    Ok(RedoPathBuf::try_from(
+        relpath(t, target_dir).map_err(RedoError::opaque_error)?,
+    )?)
 }
 
 pub(crate) fn warn_override(name: &RedoPath) {

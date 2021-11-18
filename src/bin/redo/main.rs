@@ -33,6 +33,7 @@ use std::convert::Infallible;
 use std::env;
 use std::ffi::OsString;
 use std::io;
+use std::mem;
 use std::path::{Path, PathBuf};
 
 use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
@@ -52,9 +53,14 @@ fn main() {
                 .map(|base| base.to_os_string())
         })
         .unwrap_or("redo".into());
+    let mut stdin_log_reader: Option<StdinLogReader> = None;
     let result = match name.to_str() {
         Some("redo-always") => always::run(),
-        Some("redo-ifchange") => ifchange::run(),
+        Some("redo-ifchange") => {
+            let result = ifchange::run();
+            stdin_log_reader = result.1;
+            result.0
+        }
         Some("redo-ifcreate") => ifcreate::run(),
         Some("redo-log") => log::run(),
         Some("redo-ood") => ood::run(),
@@ -63,7 +69,11 @@ fn main() {
         Some("redo-targets") => targets::run(),
         Some("redo-unlocked") => unlocked::run(),
         Some("redo-whichdo") => whichdo::run(),
-        _ => run_redo(),
+        _ => {
+            let result = run_redo();
+            stdin_log_reader = result.1;
+            result.0
+        }
     };
     match result {
         Ok(_) => std::process::exit(EXIT_SUCCESS),
@@ -81,6 +91,7 @@ fn main() {
                 s
             };
             log_err!("{}", msg);
+            mem::drop(stdin_log_reader);
             let retcode = match RedoErrorKind::of(&e) {
                 RedoErrorKind::FailedInAnotherThread { .. } => EXIT_FAILED_IN_ANOTHER_THREAD,
                 RedoErrorKind::InvalidTarget(_) => EXIT_INVALID_TARGET,
@@ -127,7 +138,7 @@ pub(crate) fn log_flags() -> Vec<clap::Arg<'static, 'static>> {
     ]
 }
 
-fn run_redo() -> Result<(), Error> {
+fn run_redo() -> (Result<(), Error>, Option<StdinLogReader>) {
     let matches = App::new("redo")
         .about("Build the listed targets whether they need it or not.")
         .version(crate_version!())
@@ -211,29 +222,44 @@ fn run_redo() -> Result<(), Error> {
     let mut targets = {
         let mut targets = Vec::<&RedoPath>::new();
         for arg in matches.values_of("target").unwrap_or_default() {
-            targets.push(RedoPath::from_str(arg)?);
+            targets.push(match RedoPath::from_str(arg) {
+                Ok(p) => p,
+                Err(e) => return (Err(e.into()), None),
+            });
         }
         targets
     };
 
-    let env = Env::init(targets.as_slice())?;
-    let mut ps = ProcessState::init(env)?;
+    let env = match Env::init(targets.as_slice()) {
+        Ok(env) => env,
+        Err(e) => return (Err(e.into()), None),
+    };
+    let mut ps = match ProcessState::init(env) {
+        Ok(ps) => ps,
+        Err(e) => return (Err(e.into()), None),
+    };
     if ps.is_toplevel() && targets.is_empty() {
         targets.push(unsafe { RedoPath::from_str_unchecked("all") });
     }
     let mut j = str::parse::<i32>(matches.value_of("jobs").unwrap_or("0")).unwrap_or(0);
     if ps.is_toplevel() && (ps.env().log().unwrap_or(true) || j > 1) {
-        builder::close_stdin()?;
+        if let Err(e) = builder::close_stdin() {
+            return (Err(e.into()), None);
+        }
     }
-    let mut _stdin_log_reader: Option<StdinLogReader> = None;
+    let mut stdin_log_reader: Option<StdinLogReader> = None;
     if ps.is_toplevel() && ps.env().log().unwrap_or(true) {
-        _stdin_log_reader = Some(
-            StdinLogReaderBuilder::from(ps.env())
+        stdin_log_reader = Some(
+            match StdinLogReaderBuilder::from(ps.env())
                 .set_status(auto_bool_arg(&matches, "status").unwrap_or(true))
                 .set_details(auto_bool_arg(&matches, "details").unwrap_or(true))
                 .set_debug_locks(auto_bool_arg(&matches, "debug-locks").unwrap_or(false))
                 .set_debug_pids(auto_bool_arg(&matches, "debug-pids").unwrap_or(false))
-                .start(ps.env())?,
+                .start(ps.env())
+            {
+                Ok(r) => r,
+                Err(e) => return (Err(e.into()), None),
+            },
         );
     } else {
         LogBuilder::from(ps.env()).setup(io::stderr());
@@ -246,40 +272,43 @@ fn run_redo() -> Result<(), Error> {
         }
     }
 
-    {
-        let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Immediate)?;
-        for t in &targets {
-            if Path::new(t).exists() {
-                let f = redo::File::from_name(&mut ptx, t, true)?;
-                if !f.is_generated() {
-                    log_warn!(
-                        "{}: exists and not marked as generated; not redoing.\n",
-                        f.nice_name(ptx.state().env())?
-                    );
+    let result = || -> Result<(), Error> {
+        {
+            let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Immediate)?;
+            for t in &targets {
+                if Path::new(t).exists() {
+                    let f = redo::File::from_name(&mut ptx, t, true)?;
+                    if !f.is_generated() {
+                        log_warn!(
+                            "{}: exists and not marked as generated; not redoing.\n",
+                            f.nice_name(ptx.state().env())?
+                        );
+                    }
                 }
             }
         }
-    }
 
-    if j < 0 || j > 1000 {
-        return Err(anyhow!("invalid --jobs value: {}", j));
-    }
-    let mut server = JobServer::setup(j)?;
-    assert!(ps.is_flushed());
-    let build_result = server.block_on(builder::run(
-        &mut ps,
-        &server.handle(),
-        &targets,
-        |_, _| -> Result<(bool, Dirtiness), Infallible> { Ok((true, Dirtiness::Dirty)) },
-    ));
-    assert!(ps.is_flushed());
-    let return_tokens_result = server.force_return_tokens();
-    if let Err(e) = &return_tokens_result {
-        log_err!("unexpected error: {}", e);
-    }
-    build_result
-        .map_err(|e| e.into())
-        .and(return_tokens_result.map_err(Into::into))
+        if j < 0 || j > 1000 {
+            return Err(anyhow!("invalid --jobs value: {}", j));
+        }
+        let mut server = JobServer::setup(j)?;
+        assert!(ps.is_flushed());
+        let build_result = server.block_on(builder::run(
+            &mut ps,
+            &server.handle(),
+            &targets,
+            |_, _| -> Result<(bool, Dirtiness), Infallible> { Ok((true, Dirtiness::Dirty)) },
+        ));
+        assert!(ps.is_flushed());
+        let return_tokens_result = server.force_return_tokens();
+        if let Err(e) = &return_tokens_result {
+            log_err!("unexpected error: {}", e);
+        }
+        build_result
+            .map_err(|e| e.into())
+            .and(return_tokens_result.map_err(Into::into))
+    }();
+    (result, stdin_log_reader)
 }
 
 /// Converts an argument pair match of `name` and `"no-" + name` into a tri-state.

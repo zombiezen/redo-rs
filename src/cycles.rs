@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::env;
 
-use super::builder::{BuildError, BuildErrorKind};
+use super::error::{RedoError, RedoErrorKind};
 
 const CYCLES_VAR: &str = "REDO_CYCLES";
 
@@ -47,10 +47,10 @@ pub(crate) fn add<'a, S: Into<Cow<'a, str>>>(fid: S) {
     }
 }
 
-pub(crate) fn check<S: AsRef<str>>(fid: S) -> Result<(), BuildError> {
+pub(crate) fn check<S: AsRef<str>>(fid: S) -> Result<(), RedoError> {
     if get().contains(fid.as_ref()) {
         // Lock already held by parent: cyclic dependency
-        Err(BuildErrorKind::CyclicDependency.into())
+        Err(RedoErrorKind::CyclicDependency.into())
     } else {
         Ok(())
     }

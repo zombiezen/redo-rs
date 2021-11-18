@@ -46,7 +46,6 @@ use std::rc::Rc;
 use std::str;
 use std::time::{Duration, SystemTime};
 
-use super::builder::BuildError;
 use super::cycles;
 use super::env::Env;
 use super::error::{RedoError, RedoErrorKind};
@@ -1181,7 +1180,7 @@ impl Lock {
     }
 
     /// Check that this lock is in a sane state.
-    pub(crate) fn check(&self) -> Result<(), BuildError> {
+    pub(crate) fn check(&self) -> Result<(), RedoError> {
         assert!(!self.owned);
         cycles::check(self.fid.to_string())?;
         Ok(())
@@ -1199,11 +1198,7 @@ impl Lock {
 
     /// Non-blocking try to acquire our lock; returns true if it worked.
     pub fn try_lock(&mut self) -> Result<bool, RedoError> {
-        use failure::Fail;
-
-        // TODO(soon): Don't make opaque.
-        self.check()
-            .map_err(|e| RedoError::opaque_error(e.compat()))?;
+        self.check()?;
         assert!(!self.owned);
         let result = fcntl::fcntl(
             self.manager.file.as_raw_fd(),
@@ -1223,11 +1218,7 @@ impl Lock {
 
     /// Try to acquire our lock, and wait if it's currently locked.
     pub fn wait_lock(&mut self, lock_type: LockType) -> Result<(), RedoError> {
-        use failure::Fail;
-
-        // TODO(soon): Don't make opaque.
-        self.check()
-            .map_err(|e| RedoError::opaque_error(e.compat()))?;
+        self.check()?;
         assert!(!self.owned);
         let fcntl_type = match lock_type {
             LockType::Exclusive => libc::F_WRLCK as c_short,

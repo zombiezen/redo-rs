@@ -32,7 +32,7 @@ pub const EXIT_TARGET_FAILED: i32 = 32;
 /// Failed to start internal helper subprocess.
 pub(crate) const EXIT_HELPER_FAILURE: i32 = 99;
 
-/// `MAKEFLAGS` specifies invalid file descriptors.
+/// `MAKEFLAGS` specified invalid file descriptors.
 pub(crate) const EXIT_INVALID_JOBSERVER: i32 = 200;
 
 /// Internal error while spawning a job.
@@ -48,7 +48,7 @@ pub const EXIT_TARGET_DIRECTLY_MODIFIED: i32 = 206;
 pub const EXIT_MULTIPLE_OUTPUTS: i32 = 207;
 
 /// Cyclic dependency detected.
-pub(crate) const EXIT_CYCLIC_DEPENDENCY: i32 = 208;
+pub const EXIT_CYCLIC_DEPENDENCY: i32 = 208;
 
 /// `BuildJob` internal error.
 pub const EXIT_BUILD_JOB_ERROR: i32 = 209;

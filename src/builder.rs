@@ -17,7 +17,6 @@
 
 //! Code for parallel-building a set of targets.
 
-use failure::{format_err, Backtrace, Context, Error, Fail, ResultExt};
 use futures::future::FusedFuture;
 use futures::stream::{FusedStream, FuturesUnordered, Stream};
 use futures::{pin_mut, select};
@@ -35,7 +34,6 @@ use std::cmp;
 use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::ffi::{CStr, CString, OsStr, OsString};
-use std::fmt::{self, Display};
 use std::fs::{self, File, Metadata};
 use std::future::{self, Future};
 use std::io::{self, BufRead, BufReader};
@@ -53,7 +51,7 @@ use zombiezen_const_cstr::const_cstr;
 use super::cycles;
 use super::deps::Dirtiness;
 use super::env::{Env, OptionalBool};
-use super::error::RedoError;
+use super::error::{RedoError, RedoErrorKind};
 use super::exits::*;
 use super::helpers::{self, OsBytes, RedoPath, RedoPathBuf};
 use super::jobserver::JobServerHandle;
@@ -67,7 +65,7 @@ struct BuildJob<'a> {
     sf: state::File,
     lock: Lock,
     should_build_func:
-        Rc<dyn Fn(&mut ProcessTransaction, &RedoPath) -> Result<(bool, Dirtiness), Error> + 'a>,
+        Rc<dyn Fn(&mut ProcessTransaction, &RedoPath) -> Result<(bool, Dirtiness), RedoError> + 'a>,
 }
 
 impl BuildJob<'_> {
@@ -80,8 +78,8 @@ impl BuildJob<'_> {
         ps_ref: Rc<RefCell<&'a mut ProcessState>>,
         mut ptx: ProcessTransaction<'_>,
         server: &JobServerHandle,
-    ) -> Result<Pin<Box<dyn Future<Output = i32> + 'a>>, Error> {
-        let before_t = try_stat(self.t.as_path())?;
+    ) -> Result<Pin<Box<dyn Future<Output = i32> + 'a>>, RedoError> {
+        let before_t = try_stat(self.t.as_path()).map_err(RedoError::opaque_error)?;
         debug_assert!(self.lock.is_owned());
         let (is_target, dirty) = (self.should_build_func)(&mut ptx, &self.t)?;
         match dirty {
@@ -114,7 +112,7 @@ impl BuildJob<'_> {
         mut ptx: ProcessTransaction<'_>,
         server: &JobServerHandle,
         before_t: Option<Metadata>,
-    ) -> Result<Pin<Box<dyn Future<Output = i32> + 'a>>, Error> {
+    ) -> Result<Pin<Box<dyn Future<Output = i32> + 'a>>, RedoError> {
         use std::os::unix::fs::MetadataExt;
         use std::os::unix::io::AsRawFd;
 
@@ -128,7 +126,7 @@ impl BuildJob<'_> {
             && !newstamp.is_missing()
             && (sf.is_override || Stamp::detect_override(sf.stamp.as_ref().unwrap(), &newstamp))
         {
-            let nice_t = nice(ptx.state().env(), &t)?;
+            let nice_t = nice(ptx.state().env(), &t).map_err(RedoError::opaque_error)?;
             state::warn_override(&nice_t);
             if !sf.is_override {
                 log_warn!("{:?} - old: {:?}\n", &nice_t, &sf.stamp);
@@ -196,9 +194,9 @@ impl BuildJob<'_> {
             tmp_base_name.push(".redo.tmp");
             df.do_dir.join(tmp_base_name)
         };
-        helpers::unlink(&tmp_name)?;
-        let out_file = tempfile::tempfile()?;
-        helpers::close_on_exec(out_file.as_raw_fd(), true)?;
+        helpers::unlink(&tmp_name).map_err(RedoError::opaque_error)?;
+        let out_file = tempfile::tempfile().map_err(RedoError::opaque_error)?;
+        helpers::close_on_exec(out_file.as_raw_fd(), true).map_err(RedoError::opaque_error)?;
         // this will run in the dofile's directory, so use only basenames here
         let arg1 = {
             // target name (with extension)
@@ -213,7 +211,7 @@ impl BuildJob<'_> {
             arg2.push(&df.base_name);
             arg2
         };
-        let cwd = env::current_dir()?;
+        let cwd = env::current_dir().map_err(RedoError::opaque_error)?;
         let mut argv: Vec<OsString> = vec![
             OsString::from("sh"),
             OsString::from("-e"),
@@ -221,7 +219,9 @@ impl BuildJob<'_> {
             arg1,
             arg2,
             // $3 temp output file name
-            state::relpath(helpers::abs_path(&cwd, &tmp_name), &df.do_dir)?.into_os_string(),
+            state::relpath(helpers::abs_path(&cwd, &tmp_name), &df.do_dir)
+                .map_err(RedoError::opaque_error)?
+                .into_os_string(),
         ];
         if ptx.state().env().verbose != 0 {
             argv[1].push("v");
@@ -230,10 +230,11 @@ impl BuildJob<'_> {
             argv[1].push("x");
         }
         let firstline = {
-            let f = File::open(df.do_dir.join(&df.do_file))?;
+            let f = File::open(df.do_dir.join(&df.do_file)).map_err(RedoError::opaque_error)?;
             let mut f = BufReader::new(f);
             let mut firstline = String::new();
-            f.read_line(&mut firstline)?;
+            f.read_line(&mut firstline)
+                .map_err(RedoError::opaque_error)?;
             firstline
         };
         let firstline = firstline.trim();
@@ -262,13 +263,14 @@ impl BuildJob<'_> {
             let lfd = TempFileBuilder::new()
                 .prefix("redo.")
                 .suffix(".log.tmp")
-                .tempfile_in(lfend.parent().unwrap())?;
-            lfd.persist(lfend)?;
+                .tempfile_in(lfend.parent().unwrap())
+                .map_err(RedoError::opaque_error)?;
+            lfd.persist(lfend).map_err(RedoError::opaque_error)?;
         }
         let mut dof = state::File::from_name(&mut ptx, &df.do_dir.join(&df.do_file), true)?;
         dof.set_static(ptx.state().env())?;
         dof.save(&mut ptx)?;
-        let ps = ptx.commit()?;
+        let ps = ptx.commit().map_err(RedoError::opaque_error)?;
         logs::meta("do", state::target_relpath(ps.env(), &t)?.as_str(), None);
 
         // Wrap out_file in a Cell, since we drop it in the subprocess.
@@ -418,7 +420,7 @@ impl BuildJob<'_> {
         ptx: ProcessTransaction<'_>,
         server: &JobServerHandle,
         targets: Vec<state::File>,
-    ) -> Result<Pin<Box<dyn Future<Output = i32> + 'a>>, Error> {
+    ) -> Result<Pin<Box<dyn Future<Output = i32> + 'a>>, RedoError> {
         use std::iter::FromIterator;
 
         // FIXME: redo-unlocked is kind of a weird hack.
@@ -426,19 +428,19 @@ impl BuildJob<'_> {
         //  directly from this process, and when done, reconsider building
         //  the target we started with.  But that makes this one process's
         //  build recursive, where currently it's flat.
-        let here = env::current_dir()?;
+        let here = env::current_dir().map_err(RedoError::opaque_error)?;
         let fix = |p: &RedoPath| -> io::Result<CString> {
             state::relpath(ptx.state().env().base().join(p), &here)
                 .map(|p| CString::new(Vec::from_iter(OsBytes::new(&p))).unwrap())
         };
         let mut argv: Vec<Cow<CStr>> = vec![
             Cow::Borrowed(const_cstr!("redo-unlocked").as_cstr()),
-            Cow::Owned(fix(self.sf.name())?),
+            Cow::Owned(fix(self.sf.name()).map_err(RedoError::opaque_error)?),
         ];
         {
             let mut names: HashSet<CString> = HashSet::new();
             for d in targets {
-                names.insert(fix(d.name())?);
+                names.insert(fix(d.name()).map_err(RedoError::opaque_error)?);
             }
             argv.extend(names.drain().map(|s| Cow::Owned(s)));
         }
@@ -447,7 +449,7 @@ impl BuildJob<'_> {
             state::target_relpath(ptx.state().env(), &self.t)?.as_str(),
             None,
         );
-        let state = ptx.commit()?;
+        let state = ptx.commit().map_err(RedoError::opaque_error)?;
         let job = server.start(self.t.into_string(), || {
             env::set_var("REDO_DEPTH", {
                 let mut depth = state.env().depth().to_string();
@@ -638,15 +640,16 @@ impl BuildJob<'_> {
 /// needs to be built, as of the time it is called. The first return value
 /// indicates whether the target is a generated file and the second is the
 /// dirtiness.
-pub async fn run<P, F>(
+pub async fn run<P, F, E>(
     ps: &mut ProcessState,
     server: &JobServerHandle,
     targets: &[P],
     should_build_func: F,
-) -> Result<(), BuildError>
+) -> Result<(), RedoError>
 where
     P: AsRef<RedoPath>,
-    F: Fn(&mut ProcessTransaction, &RedoPath) -> Result<(bool, Dirtiness), Error>,
+    F: Fn(&mut ProcessTransaction, &RedoPath) -> Result<(bool, Dirtiness), E>,
+    E: std::error::Error + Send + Sync + 'static,
 {
     use futures::future::FutureExt;
     use futures::stream::StreamExt;
@@ -659,6 +662,12 @@ where
         target_order.shuffle(&mut rand::thread_rng());
     }
 
+    let should_build_func = move |ptx: &mut ProcessTransaction, path: &RedoPath| {
+        should_build_func(ptx, path).map_err(|e| {
+            let msg = e.to_string();
+            RedoError::wrap(e, msg)
+        })
+    };
     let should_build_func = Rc::new(should_build_func);
     let mut me: Option<(PathBuf, state::File, Lock)> =
         if !ps.env().target().as_os_str().is_empty() && !ps.env().unlocked {
@@ -667,9 +676,9 @@ where
             me.push(ps.env().target());
             let myfile = {
                 let mut ptx = ProcessTransaction::new(ps, TransactionBehavior::Immediate)
-                    .context(BuildErrorKind::Generic)?;
+                    .map_err(RedoError::opaque_error)?;
                 ptx.set_drop_behavior(DropBehavior::Commit);
-                state::File::from_name(&mut ptx, &me, true).context(BuildErrorKind::Generic)?
+                state::File::from_name(&mut ptx, &me, true)?
             };
             let selflock = ps.new_lock(state::LOG_LOCK_MAGIC + myfile.id());
             Some((me, myfile, selflock))
@@ -677,7 +686,7 @@ where
             None
         };
 
-    let result: Cell<Result<(), BuildError>> = Cell::new(Ok(()));
+    let result: Cell<Result<(), RedoError>> = Cell::new(Ok(()));
     let mut locked: VecDeque<(i64, &RedoPath)> = VecDeque::new();
     let mut cheat = || -> Result<i32, RedoError> {
         let selflock = match &mut me {
@@ -707,7 +716,7 @@ where
             let t = targets[i].as_ref();
             if t.is_empty() {
                 log_err!("cannot build the empty target (\"\").\n");
-                result.set(Err(BuildErrorKind::InvalidTarget(t.into()).into()));
+                result.set(Err(RedoErrorKind::InvalidTarget(t.into()).into()));
                 break;
             }
             assert!(ps_ref.borrow().is_flushed());
@@ -720,7 +729,7 @@ where
             pin_mut!(token_future);
             wait_for(token_future, job_futures.as_mut())
                 .await
-                .context(BuildErrorKind::Generic)?;
+                .map_err(RedoError::opaque_error)?;
             let errored = {
                 let r = result.replace(Ok(()));
                 let errored = r.is_err();
@@ -734,22 +743,19 @@ where
             {
                 let mut ps = ps_ref.borrow_mut();
                 let mut ptx = ProcessTransaction::new(*ps, TransactionBehavior::Immediate)
-                    .context(BuildErrorKind::Generic)?;
+                    .map_err(RedoError::opaque_error)?;
                 ptx.set_drop_behavior(DropBehavior::Commit);
-                let mut f =
-                    state::File::from_name(&mut ptx, t, true).context(BuildErrorKind::Generic)?;
+                let mut f = state::File::from_name(&mut ptx, t, true)?;
                 let mut lock = ptx.state().new_lock(f.id().try_into().unwrap());
                 if ptx.state().env().unlocked {
                     lock.force_owned();
                 } else {
-                    lock.try_lock().context(BuildErrorKind::Generic)?;
+                    lock.try_lock()?;
                 }
                 if !lock.is_owned() {
                     logs::meta(
                         "locked",
-                        state::target_relpath(ptx.state().env(), &t)
-                            .context(BuildErrorKind::Generic)?
-                            .as_str(),
+                        state::target_relpath(ptx.state().env(), &t)?.as_str(),
                         None,
                     );
                     locked.push_back((f.id(), t));
@@ -759,23 +765,20 @@ where
                     // between then and now.
                     // FIXME: separate obtaining the fid from creating the File.
                     // FIXME: maybe integrate locking into the File object?
-                    f.refresh(&mut ptx).context(BuildErrorKind::Generic)?;
+                    f.refresh(&mut ptx)?;
                     let job = BuildJob {
                         t: t.into(),
                         sf: f,
                         lock,
                         should_build_func: should_build_func.clone(),
                     }
-                    .start(ps_ref.clone(), ptx, server)
-                    .context(BuildErrorKind::Generic)?;
+                    .start(ps_ref.clone(), ptx, server)?;
                     let t = t.to_string();
                     let result = &result;
                     job_futures.push(Box::pin(async move {
                         let rv = job.await;
                         if rv != EXIT_SUCCESS {
-                            result.set(Err(format_err!("{:?}: exit code {}", t, rv)
-                                .context(BuildErrorKind::Generic)
-                                .into()));
+                            result.set(Err(RedoError::new(format!("{:?}: exit code {}", t, rv))));
                         }
                     }));
                 }
@@ -794,9 +797,7 @@ where
     while !locked.is_empty() || server.is_running() {
         let jobs_done_future = server.wait_all();
         pin_mut!(jobs_done_future);
-        wait_for(jobs_done_future, job_futures.as_mut())
-            .await
-            .context(BuildErrorKind::Generic)?;
+        wait_for(jobs_done_future, job_futures.as_mut()).await?;
         let errored = {
             let r = result.replace(Ok(()));
             let errored = r.is_err();
@@ -810,7 +811,7 @@ where
             // TODO(soon): check_sane
             let mut lock = ps_ref.borrow().new_lock(fid);
             let mut backoff = Duration::from_millis(100);
-            lock.try_lock().context(BuildErrorKind::Generic)?;
+            lock.try_lock()?;
             while !lock.is_owned() {
                 // Don't spin with 100% CPU while we fight for the lock.
                 server
@@ -825,9 +826,7 @@ where
                 // whether it's us building it, or someone else.
                 logs::meta(
                     "waiting",
-                    state::target_relpath(ps_ref.borrow().env(), &t)
-                        .context(BuildErrorKind::Generic)?
-                        .as_str(),
+                    state::target_relpath(ps_ref.borrow().env(), &t)?.as_str(),
                     None,
                 );
                 lock.check()?;
@@ -835,57 +834,46 @@ where
                 // give up our personal token while we wait for the lock to
                 // be released; but we should never run ensure_token() while
                 // holding a lock, or we could cause deadlocks.
-                server.release_mine().context(BuildErrorKind::Generic)?;
-                lock.wait_lock(LockType::Exclusive)
-                    .context(BuildErrorKind::Generic)?;
+                server.release_mine()?;
+                lock.wait_lock(LockType::Exclusive)?;
                 // now t is definitely free, so we get to decide whether
                 // to build it.
-                lock.unlock().context(BuildErrorKind::Generic)?;
-                server
-                    .ensure_token_or_cheat(t.as_str(), &mut cheat)
-                    .await
-                    .context(BuildErrorKind::Generic)?;
-                lock.try_lock().context(BuildErrorKind::Generic)?;
+                lock.unlock()?;
+                server.ensure_token_or_cheat(t.as_str(), &mut cheat).await?;
+                lock.try_lock()?;
             }
             logs::meta(
                 "unlocked",
-                state::target_relpath(ps_ref.borrow().env(), &t)
-                    .context(BuildErrorKind::Generic)?
-                    .as_str(),
+                state::target_relpath(ps_ref.borrow().env(), &t)?.as_str(),
                 None,
             );
             {
                 let mut ps = ps_ref.borrow_mut();
                 let mut ptx = ProcessTransaction::new(*ps, TransactionBehavior::Immediate)
-                    .context(BuildErrorKind::Generic)?;
+                    .map_err(RedoError::opaque_error)?;
                 ptx.set_drop_behavior(DropBehavior::Commit);
-                let file =
-                    state::File::from_name(&mut ptx, t, true).context(BuildErrorKind::Generic)?;
+                let file = state::File::from_name(&mut ptx, t, true)?;
                 if file.is_failed(ptx.state().env()) {
-                    result.set(Err(BuildErrorKind::FailedInAnotherThread(
-                        t.to_redo_path_buf(),
-                    )
+                    result.set(Err(RedoErrorKind::FailedInAnotherThread {
+                        target: t.to_redo_path_buf(),
+                    }
                     .into()));
-                    lock.unlock().context(BuildErrorKind::Generic)?;
+                    lock.unlock()?;
                 } else {
-                    let sf =
-                        state::File::from_id(&mut ptx, fid).context(BuildErrorKind::Generic)?;
+                    let sf = state::File::from_id(&mut ptx, fid)?;
                     let job = BuildJob {
                         t: t.to_redo_path_buf(),
                         sf,
                         lock,
                         should_build_func: should_build_func.clone(),
                     }
-                    .start(ps_ref.clone(), ptx, server)
-                    .context(BuildErrorKind::Generic)?;
+                    .start(ps_ref.clone(), ptx, server)?;
                     let t = t.to_string();
                     let result = &result;
                     job_futures.push(Box::pin(async move {
                         let rv = job.await;
                         if rv != EXIT_SUCCESS {
-                            result.set(Err(format_err!("{:?}: exit code {}", t, rv)
-                                .context(BuildErrorKind::Generic)
-                                .into()));
+                            result.set(Err(RedoError::new(format!("{:?}: exit code {}", t, rv))));
                         }
                     }));
                 }
@@ -927,10 +915,10 @@ fn try_stat<P: AsRef<Path>>(path: P) -> io::Result<Option<Metadata>> {
     }
 }
 
-pub fn close_stdin() -> Result<(), Error> {
+pub fn close_stdin() -> Result<(), RedoError> {
     use std::os::unix::io::AsRawFd;
-    let f = File::open("/dev/null")?;
-    unistd::dup2(f.as_raw_fd(), 0)?;
+    let f = File::open("/dev/null").map_err(RedoError::opaque_error)?;
+    unistd::dup2(f.as_raw_fd(), 0).map_err(RedoError::opaque_error)?;
     Ok(())
 }
 
@@ -1009,20 +997,20 @@ impl StdinLogReaderBuilder {
     //
     // Then we automatically run [`logs::setup`] to send the right data format
     // to that redo-log instance.
-    pub fn start(&self, e: &Env) -> Result<StdinLogReader, Error> {
+    pub fn start(&self, e: &Env) -> Result<StdinLogReader, RedoError> {
         use std::io::Write;
 
-        let (r, w) = unistd::pipe()?; // main pipe to redo-log
-        let (ar, aw) = unistd::pipe()?; // ack pipe from redo-log --ack-fd
-        io::stdout().flush()?;
-        io::stderr().flush()?;
-        match unsafe { unistd::fork() }? {
+        let (r, w) = unistd::pipe().map_err(RedoError::opaque_error)?; // main pipe to redo-log
+        let (ar, aw) = unistd::pipe().map_err(RedoError::opaque_error)?; // ack pipe from redo-log --ack-fd
+        io::stdout().flush().map_err(RedoError::opaque_error)?;
+        io::stderr().flush().map_err(RedoError::opaque_error)?;
+        match unsafe { unistd::fork() }.map_err(RedoError::opaque_error)? {
             ForkResult::Parent { child: pid } => {
-                let stderr_fd = unistd::dup(2)?; // save for after the log pipe gets closed
-                unistd::close(r)?;
-                unistd::close(aw)?;
+                let stderr_fd = unistd::dup(2).map_err(RedoError::opaque_error)?; // save for after the log pipe gets closed
+                unistd::close(r).map_err(RedoError::opaque_error)?;
+                unistd::close(aw).map_err(RedoError::opaque_error)?;
                 let mut b = [0u8; 8];
-                let bn = unistd::read(ar, &mut b)?;
+                let bn = unistd::read(ar, &mut b).map_err(RedoError::opaque_error)?;
                 let b = &b[..bn];
                 if b.is_empty() {
                     // subprocess died without sending us anything: that's bad.
@@ -1032,10 +1020,10 @@ impl StdinLogReaderBuilder {
                 assert_eq!(b, b"REDO-OK\n");
                 // now we know the subproc is running and will report our errors
                 // to stderr, so it's okay to lose our own stderr.
-                unistd::close(ar)?;
-                unistd::dup2(w, 1)?;
-                unistd::dup2(w, 2)?;
-                unistd::close(w)?;
+                unistd::close(ar).map_err(RedoError::opaque_error)?;
+                unistd::dup2(w, 1).map_err(RedoError::opaque_error)?;
+                unistd::dup2(w, 2).map_err(RedoError::opaque_error)?;
+                unistd::close(w).map_err(RedoError::opaque_error)?;
                 LogBuilder::new()
                     .parent_logs(true)
                     .pretty(false)
@@ -1145,78 +1133,6 @@ impl Drop for StdinLogReader {
         unistd::dup2(self.stderr_fd, 1).expect("could not restore stdout");
         unistd::dup2(self.stderr_fd, 2).expect("could not restore stderr");
         wait::waitpid(Some(self.pid), None).expect("failed to wait on log reader");
-    }
-}
-
-#[derive(Debug)]
-pub struct BuildError {
-    inner: Context<BuildErrorKind>,
-}
-
-#[derive(Clone, Eq, PartialEq, Debug, Fail)]
-#[non_exhaustive]
-pub enum BuildErrorKind {
-    #[fail(display = "Build failed")]
-    Generic,
-    #[fail(display = "{:?}: failed in another thread", _0)]
-    FailedInAnotherThread(RedoPathBuf),
-    #[fail(display = "Invalid target {:?}", _0)]
-    InvalidTarget(RedoPathBuf),
-    #[fail(display = "Cyclic dependency detected")]
-    CyclicDependency,
-}
-
-impl BuildError {
-    #[inline]
-    pub fn kind(&self) -> &BuildErrorKind {
-        self.inner.get_context()
-    }
-}
-
-impl Fail for BuildError {
-    fn cause(&self) -> Option<&dyn Fail> {
-        self.inner.cause()
-    }
-
-    fn backtrace(&self) -> Option<&Backtrace> {
-        self.inner.backtrace()
-    }
-}
-
-impl Display for BuildError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        Display::fmt(&self.inner, f)
-    }
-}
-
-impl From<BuildErrorKind> for BuildError {
-    fn from(kind: BuildErrorKind) -> BuildError {
-        BuildError {
-            inner: Context::new(kind),
-        }
-    }
-}
-
-impl From<Context<BuildErrorKind>> for BuildError {
-    fn from(inner: Context<BuildErrorKind>) -> BuildError {
-        BuildError { inner: inner }
-    }
-}
-
-impl Default for BuildErrorKind {
-    #[inline]
-    fn default() -> BuildErrorKind {
-        BuildErrorKind::Generic
-    }
-}
-
-impl From<&BuildErrorKind> for i32 {
-    fn from(kind: &BuildErrorKind) -> i32 {
-        match kind {
-            BuildErrorKind::FailedInAnotherThread(_) => EXIT_FAILED_IN_ANOTHER_THREAD,
-            BuildErrorKind::InvalidTarget(_) => EXIT_INVALID_TARGET,
-            _ => EXIT_FAILURE,
-        }
     }
 }
 

@@ -29,6 +29,7 @@ mod whichdo;
 use clap::{crate_version, App, AppSettings, Arg};
 use failure::{format_err, Error};
 use rusqlite::TransactionBehavior;
+use std::convert::Infallible;
 use std::env;
 use std::ffi::OsString;
 use std::io;
@@ -38,7 +39,8 @@ use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
 use redo::logs::LogBuilder;
 use redo::{
     self, log_err, log_warn, Dirtiness, Env, JobServer, OptionalBool, ProcessState,
-    ProcessTransaction, RedoPath, EXIT_FAILURE, EXIT_SUCCESS,
+    ProcessTransaction, RedoErrorKind, RedoPath, EXIT_CYCLIC_DEPENDENCY,
+    EXIT_FAILED_IN_ANOTHER_THREAD, EXIT_FAILURE, EXIT_INVALID_TARGET, EXIT_SUCCESS,
 };
 
 fn main() {
@@ -82,10 +84,12 @@ fn main() {
                 s
             });
             log_err!("{}: {}", name.to_string_lossy(), msg);
-            let retcode = e
-                .downcast_ref::<builder::BuildError>()
-                .map(|be| i32::from(be.kind()))
-                .unwrap_or(EXIT_FAILURE);
+            let retcode = match RedoErrorKind::of(&e.compat()) {
+                RedoErrorKind::FailedInAnotherThread { .. } => EXIT_FAILED_IN_ANOTHER_THREAD,
+                RedoErrorKind::InvalidTarget(_) => EXIT_INVALID_TARGET,
+                RedoErrorKind::CyclicDependency => EXIT_CYCLIC_DEPENDENCY,
+                _ => EXIT_FAILURE,
+            };
             std::process::exit(retcode)
         }
     }
@@ -265,15 +269,12 @@ fn run_redo() -> Result<(), Error> {
     }
     let mut server = JobServer::setup(j)?;
     assert!(ps.is_flushed());
-    let server_handle = server.handle();
-    let build_result = server.block_on(async {
-        use failure::Fail;
-        let result = builder::run(&mut ps, &server_handle, &targets, |_, _| {
-            Ok((true, Dirtiness::Dirty))
-        })
-        .await;
-        result.map_err(|e| e.compat())
-    });
+    let build_result = server.block_on(builder::run(
+        &mut ps,
+        &server.handle(),
+        &targets,
+        |_, _| -> Result<(bool, Dirtiness), Infallible> { Ok((true, Dirtiness::Dirty)) },
+    ));
     assert!(ps.is_flushed());
     let return_tokens_result = server.force_return_tokens();
     if let Err(e) = &return_tokens_result {

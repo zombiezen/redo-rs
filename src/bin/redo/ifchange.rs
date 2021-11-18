@@ -15,19 +15,19 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use failure::{format_err, Error};
 use rusqlite::TransactionBehavior;
 use std::io;
 use std::path::PathBuf;
+use thiserror::Error;
 
 use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
 use redo::logs::LogBuilder;
 use redo::{
     self, log_debug2, log_err, DepMode, Dirtiness, Env, JobServer, ProcessState,
-    ProcessTransaction, RedoPath, RedoPathBuf,
+    ProcessTransaction, RedoError, RedoPath, RedoPathBuf,
 };
 
-pub(crate) fn run() -> Result<(), Error> {
+pub(crate) fn run() -> Result<(), failure::Error> {
     use std::convert::TryFrom;
 
     let mut targets = {
@@ -82,12 +82,12 @@ pub(crate) fn run() -> Result<(), Error> {
         }
     }
 
-    let server_handle = server.handle();
-    let build_result = server.block_on(async {
-        use failure::Fail;
-        let result = builder::run(&mut ps, &server_handle, &targets, should_build).await;
-        result.map_err(|e| e.compat())
-    });
+    let build_result = server.block_on(builder::run(
+        &mut ps,
+        &server.handle(),
+        &targets,
+        should_build,
+    ));
     // TODO(someday): In the original, there's a state.rollback call.
     // Unclear what this is trying to do.
     assert!(ps.is_flushed());
@@ -100,15 +100,32 @@ pub(crate) fn run() -> Result<(), Error> {
         .and(return_tokens_result.map_err(Into::into))
 }
 
-fn should_build(ptx: &mut ProcessTransaction, t: &RedoPath) -> Result<(bool, Dirtiness), Error> {
+fn should_build(
+    ptx: &mut ProcessTransaction,
+    t: &RedoPath,
+) -> Result<(bool, Dirtiness), ShouldBuildError> {
     let mut f = redo::File::from_name(ptx, t, true)?;
     if f.is_failed(ptx.state().env()) {
         // TODO(soon): ImmediateReturn(EXIT_TARGET_FAILED)
-        return Err(format_err!("target {} failed", t));
+        return Err(format!("target {} failed", t).into());
     }
     let dirty = match redo::is_dirty(ptx, &mut f, &mut Default::default())? {
         Dirtiness::NeedTargets(t) if t.len() == 1 && t[0].id() == f.id() => Dirtiness::Dirty,
         d => d,
     };
     Ok((f.is_generated(), dirty))
+}
+
+#[derive(Error, Debug)]
+enum ShouldBuildError {
+    #[error("{0}")]
+    Message(String),
+    #[error(transparent)]
+    RedoError(#[from] RedoError),
+}
+
+impl From<String> for ShouldBuildError {
+    fn from(s: String) -> ShouldBuildError {
+        ShouldBuildError::Message(s)
+    }
 }

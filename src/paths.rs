@@ -15,7 +15,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use failure::Error;
 use ouroboros::self_referencing;
 use std::ffi::{OsStr, OsString};
 use std::iter::FusedIterator;
@@ -23,6 +22,7 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::str::MatchIndices;
 
+use super::error::RedoError;
 use super::helpers;
 use super::state::{self, DepMode, ProcessTransaction};
 
@@ -261,7 +261,7 @@ impl Iterator for RecursiveDoFilesState {
 pub(crate) fn find_do_file(
     ptx: &mut ProcessTransaction,
     f: &mut state::File,
-) -> Result<Option<DoFile>, Error> {
+) -> Result<Option<DoFile>, RedoError> {
     for do_file in possible_do_files(helpers::abs_path(ptx.state().env().base(), f.name())) {
         let do_path = do_file.do_dir.join(&do_file.do_file);
         log_debug2!(

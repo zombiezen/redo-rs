@@ -309,9 +309,9 @@ impl JobServer {
     }
 
     /// Run all tasks in the job server to completion.
-    pub fn block_on<T, F, E>(&mut self, f: F) -> Result<T, failure::Error>
+    pub fn block_on<T, F, E>(&mut self, f: F) -> Result<T, RedoError>
     where
-        E: Into<failure::Error>,
+        E: std::error::Error + Send + Sync + 'static,
         F: Future<Output = Result<T, E>>,
     {
         use std::iter::FromIterator;
@@ -324,7 +324,10 @@ impl JobServer {
         loop {
             match Future::poll(f.as_mut(), &mut cx) {
                 Poll::Ready(x) => {
-                    return x.map_err(|e| e.into());
+                    return x.map_err(|e| {
+                        let msg = e.to_string();
+                        RedoError::wrap(e, msg)
+                    });
                 }
                 Poll::Pending => {
                     let now = Instant::now();
@@ -365,8 +368,7 @@ impl JobServer {
                             thread::sleep(d);
                             continue;
                         }
-                        // TODO(soon): Remove .into().
-                        return Err(RedoError::new("JobServer deadlock").into());
+                        return Err(RedoError::new("JobServer deadlock"));
                     }
                     let mut max_delay: Option<TimeVal> =
                         next_timer_duration.map(|d| helpers::timeval_from_duration(d).into());
@@ -390,10 +392,7 @@ impl JobServer {
                                 .map_err(RedoError::opaque_error)?;
                             match read_result {
                                 Some(0) => {
-                                    // TODO(soon): Remove .into().
-                                    return Err(
-                                        RedoError::new("unexpected EOF on token read").into()
-                                    );
+                                    return Err(RedoError::new("unexpected EOF on token read"));
                                 }
                                 Some(1) => {
                                     state.my_tokens += 1;
@@ -430,8 +429,7 @@ impl JobServer {
                                         .map_err(RedoError::opaque_error)?;
                                 }
                             }
-                            // TODO(soon): Remove .into().
-                            Err(e) => return Err(RedoError::opaque_error(e).into()),
+                            Err(e) => return Err(RedoError::opaque_error(e)),
                             Ok(Some(_)) => unreachable!("only 1 byte possible to read"),
                         }
                         unistd::close(fd).map_err(RedoError::opaque_error)?;
@@ -443,12 +441,10 @@ impl JobServer {
                             WaitStatus::Exited(_, status) => status,
                             WaitStatus::Signaled(_, signal, _) => -(signal as i32),
                             _ => {
-                                // TODO(soon): Remove .into().
                                 return Err(RedoError::new(format!(
                                     "unhandled process status: {:?}",
                                     rv
-                                ))
-                                .into());
+                                )));
                             }
                         };
                         debug_jobserver!("done1: rv={}", status);

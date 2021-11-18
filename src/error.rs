@@ -85,7 +85,11 @@ impl Display for RedoError {
     }
 }
 
-impl Error for RedoError {}
+impl Error for RedoError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.cause.as_ref().map(|cause| &**cause as &dyn Error)
+    }
+}
 
 impl From<RedoErrorKind> for RedoError {
     fn from(kind: RedoErrorKind) -> RedoError {
@@ -112,8 +116,9 @@ impl RedoErrorKind {
     /// Returns the first non-[`RedoErrorKind::Generic`] error kind in the error chain or
     /// [`RedoErrorKind::Generic`]
     pub fn of<E: Error + 'static>(e: &E) -> &RedoErrorKind {
-        let mut curr: Option<&(dyn Error + 'static)> = Some(e);
-        while let Some(e) = curr {
+        let mut next: Option<&(dyn Error + 'static)> = Some(e);
+        while let Some(e) = next {
+            next = e.source();
             let kind = match e.downcast_ref::<RedoError>() {
                 Some(e) => e.kind(),
                 None => continue,
@@ -121,7 +126,6 @@ impl RedoErrorKind {
             if kind != &RedoErrorKind::Generic {
                 return kind;
             }
-            curr = e.source();
         }
         &RedoErrorKind::Generic
     }

@@ -40,8 +40,7 @@ use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
 use redo::logs::LogBuilder;
 use redo::{
     self, log_err, log_warn, Dirtiness, Env, JobServer, OptionalBool, ProcessState,
-    ProcessTransaction, RedoErrorKind, RedoPath, EXIT_CYCLIC_DEPENDENCY,
-    EXIT_FAILED_IN_ANOTHER_THREAD, EXIT_FAILURE, EXIT_INVALID_TARGET, EXIT_SUCCESS,
+    ProcessTransaction, RedoErrorKind, RedoPath, EXIT_SUCCESS,
 };
 
 fn main() {
@@ -92,13 +91,7 @@ fn main() {
             };
             log_err!("{}", msg);
             mem::drop(stdin_log_reader);
-            let retcode = match RedoErrorKind::of(&e) {
-                RedoErrorKind::FailedInAnotherThread { .. } => EXIT_FAILED_IN_ANOTHER_THREAD,
-                RedoErrorKind::InvalidTarget(_) => EXIT_INVALID_TARGET,
-                RedoErrorKind::CyclicDependency => EXIT_CYCLIC_DEPENDENCY,
-                _ => EXIT_FAILURE,
-            };
-            std::process::exit(retcode)
+            std::process::exit(RedoErrorKind::of(&e).exit_code())
         }
     }
 }

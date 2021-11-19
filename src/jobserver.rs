@@ -116,7 +116,7 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::error::RedoError;
+use super::error::{RedoError, RedoErrorKind};
 use super::exits::*;
 use super::helpers::{self, IntervalTimer, IntervalTimerValue};
 
@@ -172,7 +172,8 @@ impl JobServer {
     pub fn setup(max_jobs: i32) -> Result<JobServer, RedoError> {
         assert!(max_jobs >= 0);
         debug_jobserver!("setup({})", max_jobs);
-        let makeflags = parse_makeflags(env::var_os(JobServer::MAKEFLAGS_VAR).unwrap_or_default())?;
+        let makeflags = parse_makeflags(env::var_os(JobServer::MAKEFLAGS_VAR).unwrap_or_default())
+            .map_err(|e| e.with_kind(RedoErrorKind::ImmediateExit(EXIT_INVALID_JOBSERVER)))?;
         let token_fds = match makeflags {
             Some((a, b)) => {
                 if !helpers::fd_exists(a) || !helpers::fd_exists(b) {
@@ -181,8 +182,8 @@ impl JobServer {
                     log_err!(
                         "  otherwise, see https://redo.rtfd.io/en/latest/FAQParallel/#MAKEFLAGS\n"
                     );
-                    // TODO(soon): ImmediateReturn(EXIT_INVALID_JOBSERVER)
-                    return Err(RedoError::new(
+                    return Err(RedoError::immediate_exit(
+                        EXIT_INVALID_JOBSERVER,
                         "broken --jobserver-auth from parent process",
                     ));
                 }

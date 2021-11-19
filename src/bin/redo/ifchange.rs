@@ -15,19 +15,19 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Error;
 use rusqlite::TransactionBehavior;
 use std::io;
 use std::path::PathBuf;
-use thiserror::Error;
 
 use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
 use redo::logs::LogBuilder;
 use redo::{
     self, log_debug2, log_err, DepMode, Dirtiness, Env, JobServer, ProcessState,
-    ProcessTransaction, RedoError, RedoPath, RedoPathBuf,
+    ProcessTransaction, RedoError, RedoPath, RedoPathBuf, EXIT_TARGET_FAILED,
 };
 
-pub(crate) fn run() -> (Result<(), anyhow::Error>, Option<StdinLogReader>) {
+pub(crate) fn run() -> (Result<(), Error>, Option<StdinLogReader>) {
     use std::convert::TryFrom;
 
     let mut targets = {
@@ -64,7 +64,7 @@ pub(crate) fn run() -> (Result<(), anyhow::Error>, Option<StdinLogReader>) {
         LogBuilder::from(ps.env()).setup(io::stderr());
     }
 
-    let result = || -> Result<(), anyhow::Error> {
+    let result = || -> Result<(), Error> {
         let mut server;
         {
             let mut ptx = ProcessTransaction::new(&mut ps, TransactionBehavior::Immediate)?;
@@ -120,29 +120,17 @@ pub(crate) fn run() -> (Result<(), anyhow::Error>, Option<StdinLogReader>) {
 fn should_build(
     ptx: &mut ProcessTransaction,
     t: &RedoPath,
-) -> Result<(bool, Dirtiness), ShouldBuildError> {
+) -> Result<(bool, Dirtiness), RedoError> {
     let mut f = redo::File::from_name(ptx, t, true)?;
     if f.is_failed(ptx.state().env()) {
-        // TODO(soon): ImmediateReturn(EXIT_TARGET_FAILED)
-        return Err(format!("target {} failed", t).into());
+        return Err(RedoError::immediate_exit(
+            EXIT_TARGET_FAILED,
+            format!("target {} failed", t),
+        ));
     }
     let dirty = match redo::is_dirty(ptx, &mut f, &mut Default::default())? {
         Dirtiness::NeedTargets(t) if t.len() == 1 && t[0].id() == f.id() => Dirtiness::Dirty,
         d => d,
     };
     Ok((f.is_generated(), dirty))
-}
-
-#[derive(Error, Debug)]
-enum ShouldBuildError {
-    #[error("{0}")]
-    Message(String),
-    #[error(transparent)]
-    RedoError(#[from] RedoError),
-}
-
-impl From<String> for ShouldBuildError {
-    fn from(s: String) -> ShouldBuildError {
-        ShouldBuildError::Message(s)
-    }
 }

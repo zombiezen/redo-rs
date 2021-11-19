@@ -25,5 +25,4 @@ rusqlite = { version = "0.21.0", features = ["bundled"] }
 sha-1 = "0.9.8"
 tempfile = "3.2.0"
 term_size = "0.3.2"
-thiserror = "1.0"
 zombiezen-const-cstr = "1.0"

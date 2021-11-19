@@ -19,6 +19,7 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fmt::{self, Display, Formatter};
 
+use super::exits::*;
 use super::helpers::RedoPathBuf;
 
 /// The primary error type for the `redo` crate.
@@ -38,6 +39,19 @@ impl RedoError {
     {
         RedoError {
             kind: RedoErrorKind::default(),
+            msg: msg.into(),
+            cause: None,
+        }
+    }
+
+    /// Returns an error with a given exit code.
+    #[inline]
+    pub fn immediate_exit<S>(code: i32, msg: S) -> RedoError
+    where
+        S: Into<Cow<'static, str>>,
+    {
+        RedoError {
+            kind: RedoErrorKind::ImmediateExit(code),
             msg: msg.into(),
             cause: None,
         }
@@ -110,6 +124,7 @@ pub enum RedoErrorKind {
     InvalidTarget(OsString),
     CyclicDependency,
     FileNotFound,
+    ImmediateExit(i32),
 }
 
 impl RedoErrorKind {
@@ -128,6 +143,17 @@ impl RedoErrorKind {
             }
         }
         &RedoErrorKind::Generic
+    }
+
+    /// Returns the exit code for the error kind.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            &RedoErrorKind::FailedInAnotherThread { .. } => EXIT_FAILED_IN_ANOTHER_THREAD,
+            &RedoErrorKind::InvalidTarget(_) => EXIT_INVALID_TARGET,
+            &RedoErrorKind::CyclicDependency => EXIT_CYCLIC_DEPENDENCY,
+            &RedoErrorKind::ImmediateExit(code) => code,
+            _ => EXIT_FAILURE,
+        }
     }
 }
 
@@ -148,6 +174,7 @@ impl Display for RedoErrorKind {
             RedoErrorKind::InvalidTarget(target) => write!(f, "invalid target {:?}", target),
             RedoErrorKind::CyclicDependency => f.write_str("cyclic dependency detected"),
             RedoErrorKind::FileNotFound => f.write_str("file not found"),
+            RedoErrorKind::ImmediateExit(code) => write!(f, "exit code {}", code),
         }
     }
 }

@@ -77,4 +77,4 @@ redo &&
 ## Further Reading
 
 The extensive [documentation for Avery Pennarun's redo](https://redo.readthedocs.io/en/latest/)
-is relevant for this tool as well, since it is a straight port.
+is relevant for this tool as well, since zombiezen/redo is a straight port.

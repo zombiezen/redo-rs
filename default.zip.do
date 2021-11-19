@@ -25,6 +25,7 @@ case "$1" in
 esac
 
 redo-ifchange \
+  CHANGELOG.md \
   Cargo.lock \
   Cargo.toml \
   LICENSE \
@@ -53,7 +54,7 @@ for name in \
     redo-whichdo; do
   ln -s redo "$root/bin/$name"
 done
-cp LICENSE README.md "$root/"
+cp CHANGELOG.md LICENSE README.md "$root/"
 out="$(pwd)/$3"
 cd "$mytmpdir"
 zip --recurse-paths --symlinks "$out" "$(basename "$root")"

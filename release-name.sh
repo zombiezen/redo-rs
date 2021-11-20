@@ -22,4 +22,4 @@ os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"
 version="$(cargo metadata --format-version=1 | \
   jq -r '.packages[] | select(.name == "redo") | .version')"
-echo "redo-${os}-${arch}-v${version}.zip"
+echo "redo-v${version}-${os}-${arch}.zip"

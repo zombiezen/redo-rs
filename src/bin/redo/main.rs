@@ -40,7 +40,9 @@ use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
 use redo::logs::LogBuilder;
 use redo::{
     self, log_err, log_warn, Dirtiness, Env, JobServer, OptionalBool, ProcessState,
-    ProcessTransaction, RedoErrorKind, RedoPath, EXIT_SUCCESS,
+    ProcessTransaction, RedoErrorKind, RedoPath, ENV_COLOR, ENV_DEBUG, ENV_DEBUG_LOCKS,
+    ENV_DEBUG_PIDS, ENV_KEEP_GOING, ENV_LOG, ENV_PRETTY, ENV_SHUFFLE, ENV_VERBOSE, ENV_XTRACE,
+    EXIT_SUCCESS,
 };
 
 fn main() {
@@ -170,32 +172,32 @@ fn run_redo() -> (Result<(), Error>, Option<StdinLogReader>) {
     {
         let n = matches.occurrences_of("debug");
         if n > 0 {
-            std::env::set_var("REDO_DEBUG", n.to_string());
+            std::env::set_var(ENV_DEBUG, n.to_string());
         }
     }
     {
         let n = matches.occurrences_of("verbose");
         if n > 0 {
-            std::env::set_var("REDO_VERBOSE", n.to_string());
+            std::env::set_var(ENV_VERBOSE, n.to_string());
         }
     }
     {
         let n = matches.occurrences_of("xtrace");
         if n > 0 {
-            std::env::set_var("REDO_XTRACE", n.to_string());
+            std::env::set_var(ENV_XTRACE, n.to_string());
         }
     }
     if auto_bool_arg(&matches, "keep-going").unwrap_or(false) {
-        std::env::set_var("REDO_KEEP_GOING", "1");
+        std::env::set_var(ENV_KEEP_GOING, "1");
     }
     if auto_bool_arg(&matches, "shuffle").unwrap_or(false) {
-        std::env::set_var("REDO_SHUFFLE", "1");
+        std::env::set_var(ENV_SHUFFLE, "1");
     }
     if auto_bool_arg(&matches, "debug-locks").unwrap_or(false) {
-        std::env::set_var("REDO_DEBUG_LOCKS", "1");
+        std::env::set_var(ENV_DEBUG_LOCKS, "1");
     }
     if auto_bool_arg(&matches, "debug-pids").unwrap_or(false) {
-        std::env::set_var("REDO_DEBUG_PIDS", "1");
+        std::env::set_var(ENV_DEBUG_PIDS, "1");
     }
     fn set_defint(name: &str, val: OptionalBool) {
         std::env::set_var(
@@ -209,9 +211,9 @@ fn run_redo() -> (Result<(), Error>, Option<StdinLogReader>) {
             }),
         );
     }
-    set_defint("REDO_LOG", auto_bool_arg(&matches, "log"));
-    set_defint("REDO_PRETTY", auto_bool_arg(&matches, "pretty"));
-    set_defint("REDO_COLOR", auto_bool_arg(&matches, "color"));
+    set_defint(ENV_LOG, auto_bool_arg(&matches, "log"));
+    set_defint(ENV_PRETTY, auto_bool_arg(&matches, "pretty"));
+    set_defint(ENV_COLOR, auto_bool_arg(&matches, "color"));
     let mut targets = {
         let mut targets = Vec::<&RedoPath>::new();
         for arg in matches.values_of("target").unwrap_or_default() {

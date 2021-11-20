@@ -123,11 +123,11 @@ mod paths;
 mod state;
 
 pub use deps::{is_dirty, Dirtiness, DirtyCallbacks, DirtyCallbacksBuilder};
-pub use env::{Env, OptionalBool};
+pub use env::*;
 pub use error::{RedoError, RedoErrorKind};
 pub use exits::*;
 pub use helpers::{abs_path, normpath, RedoPath, RedoPathBuf};
-pub use jobserver::JobServer;
+pub use jobserver::*;
 pub use paths::{possible_do_files, DoFile, PossibleDoFiles};
 pub use state::{
     always_filename, logname, relpath, DepMode, File, Files, Lock, LockType, ProcessState,

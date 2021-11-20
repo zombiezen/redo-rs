@@ -31,6 +31,28 @@ use tempfile::{self, TempDir};
 use super::error::{RedoError, RedoErrorKind};
 use super::helpers::{self, RedoPath, RedoPathBuf};
 
+const ENV_BASE: &str = "REDO_BASE";
+pub const ENV_COLOR: &str = "REDO_COLOR";
+pub const ENV_DEBUG: &str = "REDO_DEBUG";
+pub const ENV_DEBUG_LOCKS: &str = "REDO_DEBUG_LOCKS";
+pub const ENV_DEBUG_PIDS: &str = "REDO_DEBUG_PIDS";
+pub(crate) const ENV_DEPTH: &str = "REDO_DEPTH";
+pub const ENV_KEEP_GOING: &str = "REDO_KEEP_GOING";
+const ENV_LOCKS_BROKEN: &str = "REDO_LOCKS_BROKEN";
+pub const ENV_LOG: &str = "REDO_LOG";
+pub(crate) const ENV_LOG_INODE: &str = "REDO_LOG_INODE";
+pub const ENV_NO_OOB: &str = "REDO_NO_OOB";
+pub const ENV_PRETTY: &str = "REDO_PRETTY";
+pub(crate) const ENV_PWD: &str = "REDO_PWD";
+const ENV_REDO: &str = "REDO";
+const ENV_RUNID: &str = "REDO_RUNID";
+pub const ENV_SHUFFLE: &str = "REDO_SHUFFLE";
+const ENV_STARTDIR: &str = "REDO_STARTDIR";
+pub(crate) const ENV_TARGET: &str = "REDO_TARGET";
+pub const ENV_UNLOCKED: &str = "REDO_UNLOCKED";
+pub const ENV_VERBOSE: &str = "REDO_VERBOSE";
+pub const ENV_XTRACE: &str = "REDO_XTRACE";
+
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Env {
@@ -64,7 +86,7 @@ impl Env {
     pub fn init<P: AsRef<RedoPath>>(targets: &[P]) -> Result<Env, RedoError> {
         let mut is_toplevel = false;
         let mut redo_links_dir = None;
-        if !get_bool("REDO") {
+        if !get_bool(ENV_REDO) {
             is_toplevel = true;
             let exe_path = env::current_exe().map_err(RedoError::opaque_error)?;
             let exe_names = [
@@ -108,9 +130,9 @@ impl Env {
             }
             new_path.push(old_path);
             env::set_var("PATH", new_path);
-            env::set_var("REDO", exe_path);
+            env::set_var(ENV_REDO, exe_path);
         }
-        if !get_bool("REDO_BASE") {
+        if !get_bool(ENV_BASE) {
             let targets: Vec<&RedoPath> = if targets.is_empty() {
                 // If no other targets given, assume the current directory.
                 vec![unsafe { RedoPath::from_str_unchecked("all") }]
@@ -151,8 +173,8 @@ impl Env {
                     None
                 };
             }
-            env::set_var("REDO_BASE", base.unwrap_or(orig_base));
-            env::set_var("REDO_STARTDIR", cwd);
+            env::set_var(ENV_BASE, base.unwrap_or(orig_base));
+            env::set_var(ENV_STARTDIR, cwd);
         }
         Ok(Env {
             is_toplevel,
@@ -188,12 +210,12 @@ impl Env {
     /// Start a session (if needed) for a command that needs no state db.
     pub fn init_no_state() -> Result<Env, RedoError> {
         let mut is_toplevel = false;
-        if !get_bool("REDO") {
-            env::set_var("REDO", "NOT_DEFINED");
+        if !get_bool(ENV_REDO) {
+            env::set_var(ENV_REDO, "NOT_DEFINED");
             is_toplevel = true;
         }
-        if !get_bool("REDO_BASE") {
-            env::set_var("REDO_BASE", "NOT_DEFINED");
+        if !get_bool(ENV_BASE) {
+            env::set_var(ENV_BASE, "NOT_DEFINED");
         }
         Ok(Env {
             is_toplevel,
@@ -205,50 +227,50 @@ impl Env {
     pub fn inherit() -> Result<Env, RedoError> {
         use std::convert::TryFrom;
 
-        if !get_bool("REDO") {
+        if !get_bool(ENV_REDO) {
             return Err(RedoError::new(format!("must be run from inside a .do")));
         }
         let v = Env {
             is_toplevel: false,
-            base: env::var_os("REDO_BASE").unwrap_or_default().into(),
-            pwd: env::var_os("REDO_PWD").unwrap_or_default().into(),
-            target: RedoPathBuf::try_from(env::var_os("REDO_TARGET").unwrap_or_default()).map_err(
+            base: env::var_os(ENV_BASE).unwrap_or_default().into(),
+            pwd: env::var_os(ENV_PWD).unwrap_or_default().into(),
+            target: RedoPathBuf::try_from(env::var_os(ENV_TARGET).unwrap_or_default()).map_err(
                 |e| {
-                    RedoError::new(format!("REDO_TARGET: {}", e))
+                    RedoError::new(format!("{}: {}", ENV_TARGET, e))
                         .with_kind(RedoErrorKind::InvalidTarget(e.input().to_os_string()))
                 },
             )?,
-            depth: env::var("REDO_DEPTH").unwrap_or_default(),
-            debug: get_int("REDO_DEBUG", 0) as i32,
-            debug_locks: get_bool("REDO_DEBUG_LOCKS"),
-            debug_pids: get_bool("REDO_DEBUG_PIDS"),
-            locks_broken: get_bool("REDO_LOCKS_BROKEN"),
-            verbose: get_int("REDO_VERBOSE", 0) as i32,
-            xtrace: get_int("REDO_XTRACE", 0) as i32,
-            keep_going: get_bool("REDO_KEEP_GOING"),
-            log: get_int("REDO_LOG", 1) as i32,
-            log_inode: env::var_os("REDO_LOG_INODE").unwrap_or_default(),
-            color: get_int("REDO_COLOR", 0) as i32,
-            pretty: get_int("REDO_PRETTY", 0) as i32,
-            shuffle: get_bool("REDO_SHUFFLE"),
-            startdir: env::var_os("REDO_STARTDIR").unwrap_or_default().into(),
-            runid: match get_int("REDO_RUNID", 0) {
+            depth: env::var(ENV_DEPTH).unwrap_or_default(),
+            debug: get_int(ENV_DEBUG, 0) as i32,
+            debug_locks: get_bool(ENV_DEBUG_LOCKS),
+            debug_pids: get_bool(ENV_DEBUG_PIDS),
+            locks_broken: get_bool(ENV_LOCKS_BROKEN),
+            verbose: get_int(ENV_VERBOSE, 0) as i32,
+            xtrace: get_int(ENV_XTRACE, 0) as i32,
+            keep_going: get_bool(ENV_KEEP_GOING),
+            log: get_int(ENV_LOG, 1) as i32,
+            log_inode: env::var_os(ENV_LOG_INODE).unwrap_or_default(),
+            color: get_int(ENV_COLOR, 0) as i32,
+            pretty: get_int(ENV_PRETTY, 0) as i32,
+            shuffle: get_bool(ENV_SHUFFLE),
+            startdir: env::var_os(ENV_STARTDIR).unwrap_or_default().into(),
+            runid: match get_int(ENV_RUNID, 0) {
                 0 => None,
                 x => Some(x),
             },
-            unlocked: get_bool("REDO_UNLOCKED"),
-            no_oob: get_bool("REDO_NO_OOB"),
+            unlocked: get_bool(ENV_UNLOCKED),
+            no_oob: get_bool(ENV_NO_OOB),
             redo_links_dir: None,
         };
         if v.depth.contains(|c| c != ' ') {
             return Err(RedoError::new(format!(
-                "REDO_DEPTH={:?} contains non-space characters",
-                &v.depth
+                "{}={:?} contains non-space characters",
+                ENV_DEPTH, &v.depth
             )));
         }
         // not inheritable by subprocesses
-        env::set_var("REDO_UNLOCKED", "");
-        env::set_var("REDO_NO_OOB", "");
+        env::set_var(ENV_UNLOCKED, "");
+        env::set_var(ENV_NO_OOB, "");
         Ok(v)
     }
 
@@ -358,10 +380,10 @@ impl Env {
 
     /// If file locking is broken, update the environment accordingly.
     pub(crate) fn mark_locks_broken(&mut self) {
-        env::set_var("REDO_LOCKS_BROKEN", "1");
+        env::set_var(ENV_LOCKS_BROKEN, "1");
         // FIXME: redo-log doesn't work when fcntl locks are broken.
         // We can probably work around that someday.
-        env::set_var("REDO_LOG", "0");
+        env::set_var(ENV_LOG, "0");
 
         self.locks_broken = true;
         self.log = 0;
@@ -370,7 +392,7 @@ impl Env {
     pub(crate) fn fill_runid(&mut self, runid: i64) {
         assert!(self.runid.is_none());
         self.runid = Some(runid);
-        env::set_var("REDO_RUNID", runid.to_string());
+        env::set_var(ENV_RUNID, runid.to_string());
     }
 }
 

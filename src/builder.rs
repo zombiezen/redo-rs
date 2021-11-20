@@ -50,7 +50,10 @@ use zombiezen_const_cstr::const_cstr;
 
 use super::cycles;
 use super::deps::Dirtiness;
-use super::env::{Env, OptionalBool};
+use super::env::{
+    Env, OptionalBool, ENV_DEPTH, ENV_LOG, ENV_LOG_INODE, ENV_PWD, ENV_TARGET, ENV_VERBOSE,
+    ENV_XTRACE,
+};
 use super::error::{RedoError, RedoErrorKind};
 use super::exits::*;
 use super::helpers::{self, OsBytes, RedoPath, RedoPathBuf};
@@ -294,29 +297,29 @@ impl BuildJob<'_> {
             // CDPATH apparently caused unexpected 'cd' output on some platforms.
             env::remove_var("CDPATH");
             env::set_var(
-                "REDO_PWD",
+                ENV_PWD,
                 match state::relpath(newp, &ps.env().startdir) {
                     Ok(path) => path,
                     Err(_) => return EXIT_FAILURE,
                 },
             );
-            env::set_var("REDO_TARGET", {
+            env::set_var(ENV_TARGET, {
                 let mut target = OsString::new();
                 target.push(&df.base_name);
                 target.push(&df.ext);
                 target
             });
-            env::set_var("REDO_DEPTH", {
+            env::set_var(ENV_DEPTH, {
                 let mut depth = String::new();
                 depth.push_str(ps.env().depth());
                 depth.push_str("  ");
                 depth
             });
             if ps.env().xtrace == 1 {
-                env::set_var("REDO_XTRACE", "0");
+                env::set_var(ENV_XTRACE, "0");
             }
             if ps.env().verbose == 1 {
-                env::set_var("REDO_VERBOSE", "0");
+                env::set_var(ENV_VERBOSE, "0");
             }
             cycles::add(lock.file_id().to_string());
             if !df.do_dir.as_os_str().is_empty() {
@@ -353,14 +356,14 @@ impl BuildJob<'_> {
                         .metadata()
                         .map(|m| OsString::from(m.ino().to_string()))
                         .unwrap_or_default();
-                    env::set_var("REDO_LOG", "1"); // .do files can check this
-                    env::set_var("REDO_LOG_INODE", new_inode);
+                    env::set_var(ENV_LOG, "1"); // .do files can check this
+                    env::set_var(ENV_LOG_INODE, new_inode);
                     unistd::dup2(logf.as_raw_fd(), 2).expect("cannot redirect log to stderr");
                     let _ = helpers::close_on_exec(2, false);
                 }
             } else {
-                env::remove_var("REDO_LOG_INODE");
-                env::set_var("REDO_LOG", "0");
+                env::remove_var(ENV_LOG_INODE);
+                env::set_var(ENV_LOG, "0");
             }
             if unsafe { signal::signal(Signal::SIGPIPE, SigHandler::SigDfl) }.is_err() {
                 return EXIT_FAILURE;
@@ -451,7 +454,7 @@ impl BuildJob<'_> {
         );
         let state = ptx.commit().map_err(RedoError::opaque_error)?;
         let job = server.start(self.t.into_string(), || {
-            env::set_var("REDO_DEPTH", {
+            env::set_var(ENV_DEPTH, {
                 let mut depth = state.env().depth().to_string();
                 depth.push_str("  ");
                 depth

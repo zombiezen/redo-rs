@@ -23,13 +23,13 @@ use std::env;
 
 use super::error::{RedoError, RedoErrorKind};
 
-const CYCLES_VAR: &str = "REDO_CYCLES";
+const ENV_CYCLES: &str = "REDO_CYCLES";
 
 /// Get the set of held cycle items.
 fn get() -> HashSet<String> {
     use std::iter::FromIterator;
 
-    env::var(CYCLES_VAR)
+    env::var(ENV_CYCLES)
         .map(|v| HashSet::from_iter(v.split(':').map(|s| s.to_string())))
         .unwrap_or_default()
 }
@@ -43,7 +43,7 @@ pub(crate) fn add<'a, S: Into<Cow<'a, str>>>(fid: S) {
     if !items.contains(&fid as &str) {
         items.insert(fid.into_owned());
         let items = Vec::from_iter(items);
-        env::set_var(CYCLES_VAR, items.join(":"));
+        env::set_var(ENV_CYCLES, items.join(":"));
     }
 }
 

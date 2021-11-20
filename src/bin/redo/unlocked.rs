@@ -24,7 +24,7 @@ use std::io;
 use std::process::{self, Command};
 
 use redo::logs::LogBuilder;
-use redo::{self, Env, EXIT_FAILURE};
+use redo::{self, Env, ENV_NO_OOB, ENV_UNLOCKED, EXIT_FAILURE};
 
 pub(crate) fn run() -> Result<(), Error> {
     let mut args = env::args_os();
@@ -42,7 +42,7 @@ pub(crate) fn run() -> Result<(), Error> {
     // grabbing locks.
     let status = Command::new("redo-ifchange")
         .args(deps.iter().cloned())
-        .env("REDO_NO_OOB", "1")
+        .env(ENV_NO_OOB, "1")
         .spawn()?
         .wait()?;
     if !status.success() {
@@ -56,8 +56,8 @@ pub(crate) fn run() -> Result<(), Error> {
     // who initiated the OOB in the first place.)
     let status = Command::new("redo-ifchange")
         .args(deps.iter().cloned())
-        .env("REDO_NO_OOB", "1")
-        .env("REDO_UNLOCKED", "1")
+        .env(ENV_NO_OOB, "1")
+        .env(ENV_UNLOCKED, "1")
         .spawn()?
         .wait()?;
     if !status.success() {

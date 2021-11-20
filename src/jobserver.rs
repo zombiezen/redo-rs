@@ -116,6 +116,7 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::env::ENV_TARGET;
 use super::error::{RedoError, RedoErrorKind};
 use super::exits::*;
 use super::helpers::{self, IntervalTimer, IntervalTimerValue};
@@ -166,13 +167,13 @@ pub struct JobServer {
 }
 
 impl JobServer {
-    const CHEATFDS_VAR: &'static str = "REDO_CHEATFDS";
-    const MAKEFLAGS_VAR: &'static str = "MAKEFLAGS";
+    const ENV_CHEATFDS: &'static str = "REDO_CHEATFDS";
+    const ENV_MAKEFLAGS: &'static str = "MAKEFLAGS";
 
     pub fn setup(max_jobs: i32) -> Result<JobServer, RedoError> {
         assert!(max_jobs >= 0);
         debug_jobserver!("setup({})", max_jobs);
-        let makeflags = parse_makeflags(env::var_os(JobServer::MAKEFLAGS_VAR).unwrap_or_default())
+        let makeflags = parse_makeflags(env::var_os(JobServer::ENV_MAKEFLAGS).unwrap_or_default())
             .map_err(|e| e.with_kind(RedoErrorKind::ImmediateExit(EXIT_INVALID_JOBSERVER)))?;
         let token_fds = match makeflags {
             Some((a, b)) => {
@@ -213,7 +214,7 @@ impl JobServer {
             None => None,
         };
         let cheats = if max_jobs == 0 {
-            match env::var(JobServer::CHEATFDS_VAR) {
+            match env::var(JobServer::ENV_CHEATFDS) {
                 Ok(v) => v,
                 Err(VarError::NotPresent) => String::new(),
                 Err(e) => return Err(RedoError::opaque_error(e)),
@@ -244,7 +245,7 @@ impl JobServer {
                     _ => {
                         return Err(RedoError::new(format!(
                             "invalid {}: {:?}",
-                            JobServer::CHEATFDS_VAR,
+                            JobServer::ENV_CHEATFDS,
                             cheats
                         )))
                     }
@@ -256,7 +257,7 @@ impl JobServer {
                 Some(cheat_fds) => cheat_fds,
                 None => {
                     let (a, b) = make_pipe(102).map_err(RedoError::opaque_error)?;
-                    env::set_var(JobServer::CHEATFDS_VAR, format!("{},{}", a, b));
+                    env::set_var(JobServer::ENV_CHEATFDS, format!("{},{}", a, b));
                     (a, b)
                 }
             }
@@ -290,7 +291,7 @@ impl JobServer {
                     dropped: false,
                 };
                 env::set_var(
-                    JobServer::MAKEFLAGS_VAR,
+                    JobServer::ENV_MAKEFLAGS,
                     format!(
                         " -j --jobserver-auth={0},{1} --jobserver-fds={0},{1}",
                         token_fds.0, token_fds.1
@@ -776,7 +777,7 @@ impl JobServerHandle {
                     // TODO(maybe): Switch direct environment variable access with Env field.
                     debug_jobserver!(
                         "{}: {}: cheat = {}",
-                        env::var("REDO_TARGET").unwrap_or_default(),
+                        env::var(ENV_TARGET).unwrap_or_default(),
                         reason,
                         n
                     );
@@ -1149,8 +1150,8 @@ mod tests {
 
     #[test]
     fn start_job() {
-        let _var1 = remove_var_for_test(OsString::from(JobServer::MAKEFLAGS_VAR));
-        let _var2 = remove_var_for_test(OsString::from(JobServer::CHEATFDS_VAR));
+        let _var1 = remove_var_for_test(OsString::from(JobServer::ENV_MAKEFLAGS));
+        let _var2 = remove_var_for_test(OsString::from(JobServer::ENV_CHEATFDS));
 
         let mut server = JobServer::setup(1).unwrap();
         let job = server.handle().start("foo".into(), || 4).unwrap();
@@ -1162,8 +1163,8 @@ mod tests {
 
     #[test]
     fn sleep() {
-        let _var1 = remove_var_for_test(OsString::from(JobServer::MAKEFLAGS_VAR));
-        let _var2 = remove_var_for_test(OsString::from(JobServer::CHEATFDS_VAR));
+        let _var1 = remove_var_for_test(OsString::from(JobServer::ENV_MAKEFLAGS));
+        let _var2 = remove_var_for_test(OsString::from(JobServer::ENV_CHEATFDS));
 
         let mut server = JobServer::setup(1).unwrap();
         let start = Instant::now();
@@ -1184,8 +1185,8 @@ mod tests {
     fn sleep_concurrently_with_job() {
         use futures::future;
 
-        let _var1 = remove_var_for_test(OsString::from(JobServer::MAKEFLAGS_VAR));
-        let _var2 = remove_var_for_test(OsString::from(JobServer::CHEATFDS_VAR));
+        let _var1 = remove_var_for_test(OsString::from(JobServer::ENV_MAKEFLAGS));
+        let _var2 = remove_var_for_test(OsString::from(JobServer::ENV_CHEATFDS));
 
         let mut server = JobServer::setup(1).unwrap();
         let start = Instant::now();

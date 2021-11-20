@@ -411,7 +411,8 @@ pub fn set_depth(depth: usize) {
 
 /// Write a line to the process-wide logger.
 ///
-/// If this is called before [`setup`], then the line is written to stderr.
+/// If this is called before [`LogBuilder::setup`],
+/// then the line is written to stderr.
 ///
 /// # Panics
 ///

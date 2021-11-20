@@ -1,6 +1,6 @@
 [package]
 name = "redo"
-version = "0.2.0-alpha1"
+version = "0.2.0"
 authors = ["Ross Light <ross@zombiezen.com>"]
 edition = "2018"
 repository = "https://github.com/zombiezen/redo-rs"

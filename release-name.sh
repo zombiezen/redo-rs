@@ -19,7 +19,7 @@
 set -euo pipefail
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
-arch="$(uname -m)"
+arch="$(uname -m | tr '_' '-')"
 version="$(cargo metadata --format-version=1 | \
   jq -r '.packages[] | select(.name == "redo") | .version')"
-echo "redo-v${version}-${os}-${arch}.zip"
+echo "redo_v${version}_${os}_${arch}.zip"

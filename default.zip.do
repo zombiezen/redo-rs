@@ -20,8 +20,8 @@
 exec >&2
 
 case "$1" in
-  redo-*) ;;
-	*) echo "$0: don't know how to build '$1'" >&2; exit 99 ;;
+  redo_*) ;;
+  *) echo "$0: don't know how to build '$1'" >&2; exit 99 ;;
 esac
 
 redo-ifchange \

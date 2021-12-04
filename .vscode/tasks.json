@@ -5,13 +5,13 @@
 	"tasks": [
 		{
 			"type": "redo",
-			"target": "all",
+			"target": "debug",
 			"group": {
 				"kind": "build",
 				"isDefault": true
 			},
 			"problemMatcher": "$rustc",
-			"label": "redo: all"
+			"label": "redo: debug"
 		},
 		{
 			"type": "redo",

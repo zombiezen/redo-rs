@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning][].
 
 - `redo` and `redo-ifchange` no longer send logs to stderr after they have exited,
   nor do they leave zombie `redo-log` processes.
+- Fixed various path manipulation issues.
 
 ## [0.2.0][] - 2021-11-19
 

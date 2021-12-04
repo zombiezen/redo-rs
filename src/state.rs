@@ -40,7 +40,7 @@ use std::iter::FusedIterator;
 use std::mem;
 use std::num::TryFromIntError;
 use std::os::unix::io::AsRawFd;
-use std::path::{Path, PathBuf};
+use std::path::{self, Path, PathBuf};
 use std::process;
 use std::rc::Rc;
 use std::str;
@@ -50,7 +50,7 @@ use super::cycles;
 use super::env::Env;
 use super::error::{RedoError, RedoErrorKind};
 use super::exits::*;
-use super::helpers::{self, RedoPath, RedoPathBuf};
+use super::helpers::{self, OsBytes, RedoPath, RedoPathBuf};
 
 const SCHEMA_VER: i32 = 2;
 
@@ -1274,13 +1274,22 @@ fn fid_flock(typ: c_short, fid: i64) -> Result<flock, TryFromIntError> {
 /// Given a relative or absolute path `t`, express it relative to `base`.
 pub fn relpath<P1: AsRef<Path>, P2: AsRef<Path>>(t: P1, base: P2) -> io::Result<PathBuf> {
     let t = t.as_ref();
-    // TODO(maybe): Memoize cwd
-    let cwd = std::env::current_dir()?;
-    let t = cwd.join(t);
+    let t = if t.is_absolute() {
+        Cow::Borrowed(t)
+    } else {
+        // TODO(maybe): Memoize cwd
+        let cwd = std::env::current_dir()?;
+        Cow::Owned(cwd.join(t))
+    };
     let t = realdirpath(&t)?;
     let t = helpers::normpath(&t);
 
     let base = base.as_ref();
+    assert!(
+        base.is_absolute(),
+        "relpath called with relative base {:?}",
+        base
+    );
     let base = realdirpath(&base)?;
     let base = helpers::normpath(&base);
 
@@ -1356,18 +1365,46 @@ fn realdirpath<'a, P>(t: &'a P) -> io::Result<Cow<'a, Path>>
 where
     P: AsRef<Path> + ?Sized,
 {
-    let t = helpers::abs_path(&env::current_dir()?, t.as_ref());
-    match t.parent() {
-        None => Ok(t),
-        Some(dname) => {
-            let fname = t.file_name().unwrap_or(OsStr::new(".."));
-            let mut buf = dname.canonicalize().or_else(|e| match e.kind() {
-                io::ErrorKind::NotFound => Ok(helpers::normpath(dname).into_owned()),
-                _ => Err(e),
-            })?;
-            buf.push(fname);
-            Ok(Cow::Owned(buf))
+    let t = t.as_ref();
+    let i = OsBytes::new(t)
+        .collect::<Vec<u8>>()
+        .iter()
+        .copied()
+        .rposition(|c| path::is_separator(c as char));
+    let (dname, fname) = match i {
+        Some(i) => {
+            let dname = match OsBytes::new(t).osstr_slice(i + 1) {
+                Cow::Owned(s) => Cow::Owned(PathBuf::from(s)),
+                Cow::Borrowed(s) => Cow::Borrowed(Path::new(s)),
+            };
+            let fname: &OsStr = {
+                let mut bytes = OsBytes::new(t);
+                for _ in 0..(i + 1) {
+                    bytes.next();
+                }
+                bytes.into()
+            };
+            (dname, Path::new(fname))
         }
+        None => (Cow::Borrowed(Path::new(".")), t),
+    };
+    if dname == Path::new(".") {
+        Ok(Cow::Borrowed(t))
+    } else {
+        let mut buf = match dname.canonicalize() {
+            Ok(path) => path,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let dname = if dname.is_absolute() {
+                    dname
+                } else {
+                    Cow::Owned(env::current_dir()?.join(dname))
+                };
+                helpers::normpath(&dname).into_owned()
+            }
+            Err(e) => return Err(e),
+        };
+        buf.push(fname);
+        Ok(Cow::Owned(buf))
     }
 }
 
@@ -1389,17 +1426,12 @@ mod tests {
 
     realdirpath_tests!(
         realdirpath_root: ("/", "/"),
+        realdirpath_curdir: (".", "."),
         realdirpath_top: ("/foo.txt", "/foo.txt"),
         realdirpath_trailing_parent: ("/foo/..", "/foo/.."),
-        realdirpath_intermediate_parent: ("/foo/../bar", "/bar"),
+        realdirpath_intermediate_parent1: ("/foo/../bar", "/bar"),
+        realdirpath_intermediate_parent2: ("/workspace/cmd/server/../../client/dist/../install", "/workspace/client/install"),
     );
-
-    #[test]
-    fn realdirpath_curdir() {
-        let curdir = env::current_dir().unwrap();
-        let t = ".";
-        assert_eq!(curdir, realdirpath(&t).unwrap().as_os_str());
-    }
 
     macro_rules! relpath_tests {
         ($($name:ident: $value:expr,)*) => {
@@ -1423,19 +1455,6 @@ mod tests {
         relpath_basic: ("/a/b/c", "/a", "b/c"),
         relpath_different_root: ("/a/b/c", "/d", "../a/b/c"),
         relpath_tricky_parents: ("/home/light/src/github.com/zombiezen/redo-rs/.redo/../test.redo.tmp", "/home/light/src/github.com/zombiezen/redo-rs/.redo/..", "test.redo.tmp"),
+        relpath_more_tricky_parents: ("/workspace/cmd/server/../../client/dist/../install", "/workspace", "client/install"),
     );
-
-    #[test]
-    fn relpath_curdir() {
-        let curdir = env::current_dir().unwrap();
-        let t = curdir.parent().unwrap().join("foo");
-        let base = ".";
-        assert_eq!(
-            "../foo",
-            relpath(&t, &base).unwrap().as_os_str(),
-            "t={:?}, base={:?}",
-            &t,
-            &base,
-        );
-    }
 }

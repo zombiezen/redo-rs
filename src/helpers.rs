@@ -712,7 +712,7 @@ pub fn normpath<'a, P: AsRef<Path> + ?Sized>(p: &'a P) -> Cow<'a, Path> {
     let original = p.as_ref();
     let (vol_len, p) = strip_volume_name(original);
     if p.as_os_str().is_empty() {
-        let mut buf = OsString::from(p.as_os_str());
+        let mut buf = OsString::from(original.as_os_str());
         buf.push(".");
         return Cow::Owned(buf.into());
     }
@@ -825,9 +825,16 @@ impl<'a> OsBytes<'a> {
     }
 
     #[inline]
-    fn osstr_slice(&self, n: usize) -> Cow<'a, OsStr> {
+    pub(crate) fn osstr_slice(&self, n: usize) -> Cow<'a, OsStr> {
         use std::os::unix::ffi::OsStrExt;
         Cow::Borrowed(OsStr::from_bytes(&self.s.as_bytes()[..n]))
+    }
+}
+
+#[cfg(unix)]
+impl<'a> From<OsBytes<'a>> for &'a OsStr {
+    fn from(b: OsBytes<'a>) -> &'a OsStr {
+        b.s
     }
 }
 
@@ -909,12 +916,13 @@ impl<'a> LazyBuf<'a> {
     fn into_osstring(mut self) -> Cow<'a, OsStr> {
         match self.buf.take() {
             None => OsBytes::new(self.vol_and_path).osstr_slice(self.vol_len + self.w),
-            Some(buf) => Cow::Owned(OsBytes::new_osstring(if self.vol_len == 0 {
+            Some(mut buf) => Cow::Owned(OsBytes::new_osstring(if self.vol_len == 0 {
+                buf.truncate(self.w);
                 buf
             } else {
                 let mut new_buf = Vec::with_capacity(self.vol_len + buf.len());
                 new_buf.extend(OsBytes::new(&self.vol_and_path).take(self.vol_len));
-                new_buf.extend(buf);
+                new_buf.extend(&buf[..self.w]);
                 new_buf
             })),
         }
@@ -975,5 +983,6 @@ mod tests {
         normpath_combo1: ("abc/./../def", "def"),
         normpath_combo2: ("abc//./../def", "def"),
         normpath_combo3: ("abc/../../././../def", "../../def"),
+        normpath_combo4: ("/abc/def/ghi/../../jkl/mno/..", "/abc/jkl"),
     );
 }

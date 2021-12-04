@@ -39,10 +39,11 @@ pub(crate) fn run() -> Result<(), Error> {
         log_err!("cannot build the empty target (\"\").\n");
         process::exit(EXIT_INVALID_TARGET);
     }
-    let want = redo::abs_path(&env::current_dir()?, Path::new(&want));
+    let cwd = env::current_dir()?;
+    let want = redo::abs_path(&cwd, Path::new(&want));
     for df in redo::possible_do_files(want) {
         let do_path = df.do_dir().join(df.do_file());
-        let relpath = redo::relpath(&do_path, ".")?;
+        let relpath = redo::relpath(&do_path, &cwd)?;
         let relpath_str = relpath.as_os_str().to_str().unwrap();
         assert!(!relpath_str.contains('\n'));
         println!("{}", relpath_str);

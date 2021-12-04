@@ -33,7 +33,6 @@ use std::convert::Infallible;
 use std::env;
 use std::ffi::OsString;
 use std::io;
-use std::mem;
 use std::path::{Path, PathBuf};
 
 use redo::builder::{self, StdinLogReader, StdinLogReaderBuilder};
@@ -46,56 +45,58 @@ use redo::{
 };
 
 fn main() {
-    let name = env::args_os()
-        .nth(0)
-        .and_then(|a0| {
-            PathBuf::from(a0)
-                .file_name()
-                .map(|base| base.to_os_string())
-        })
-        .unwrap_or("redo".into());
-    let mut stdin_log_reader: Option<StdinLogReader> = None;
-    let result = match name.to_str() {
-        Some("redo-always") => always::run(),
-        Some("redo-ifchange") => {
-            let result = ifchange::run();
-            stdin_log_reader = result.1;
-            result.0
-        }
-        Some("redo-ifcreate") => ifcreate::run(),
-        Some("redo-log") => log::run(),
-        Some("redo-ood") => ood::run(),
-        Some("redo-sources") => sources::run(),
-        Some("redo-stamp") => stamp::run(),
-        Some("redo-targets") => targets::run(),
-        Some("redo-unlocked") => unlocked::run(),
-        Some("redo-whichdo") => whichdo::run(),
-        _ => {
-            let result = run_redo();
-            stdin_log_reader = result.1;
-            result.0
+    let exit_code = {
+        let name = env::args_os()
+            .nth(0)
+            .and_then(|a0| {
+                PathBuf::from(a0)
+                    .file_name()
+                    .map(|base| base.to_os_string())
+            })
+            .unwrap_or("redo".into());
+        let mut _stdin_log_reader: Option<StdinLogReader> = None; // dropped right before exiting
+        let result = match name.to_str() {
+            Some("redo-always") => always::run(),
+            Some("redo-ifchange") => {
+                let result = ifchange::run();
+                _stdin_log_reader = result.1;
+                result.0
+            }
+            Some("redo-ifcreate") => ifcreate::run(),
+            Some("redo-log") => log::run(),
+            Some("redo-ood") => ood::run(),
+            Some("redo-sources") => sources::run(),
+            Some("redo-stamp") => stamp::run(),
+            Some("redo-targets") => targets::run(),
+            Some("redo-unlocked") => unlocked::run(),
+            Some("redo-whichdo") => whichdo::run(),
+            _ => {
+                let result = run_redo();
+                _stdin_log_reader = result.1;
+                result.0
+            }
+        };
+        match result {
+            Ok(_) => EXIT_SUCCESS,
+            Err(e) => {
+                let msg = {
+                    use std::fmt::Write;
+
+                    let mut s = String::new();
+                    for e in e.chain() {
+                        if !s.is_empty() {
+                            write!(s, ": ").unwrap();
+                        }
+                        write!(s, "{}", e).unwrap();
+                    }
+                    s
+                };
+                log_err!("{}", msg);
+                RedoErrorKind::of(&e).exit_code()
+            }
         }
     };
-    match result {
-        Ok(_) => std::process::exit(EXIT_SUCCESS),
-        Err(e) => {
-            let msg = {
-                use std::fmt::Write;
-
-                let mut s = String::new();
-                for e in e.chain() {
-                    if !s.is_empty() {
-                        write!(s, ": ").unwrap();
-                    }
-                    write!(s, "{}", e).unwrap();
-                }
-                s
-            };
-            log_err!("{}", msg);
-            mem::drop(stdin_log_reader);
-            std::process::exit(RedoErrorKind::of(&e).exit_code())
-        }
-    }
+    std::process::exit(exit_code);
 }
 
 /// Return the common list of `redo-log` flags.

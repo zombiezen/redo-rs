@@ -18,3 +18,7 @@
 .do_built.dir/
 *.did
 /minimal/y
+
+# Nix
+result
+result-*

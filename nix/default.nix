@@ -17,34 +17,10 @@
 { pkgs ? import (fetchTarball "https://github.com/NixOS/nixpkgs/archive/0c408a087b4751c887e463e3848512c12017be25.tar.gz") {}
 }:
 
-let
-  redo = {
-    lib,
-    nix-gitignore,
-    rustPlatform,
-  }: rustPlatform.buildRustPackage rec {
-    pname = "redo";
-    version = "0.2.2-alpha1";
-
-    src = nix-gitignore.gitignoreSource ["/t/" "/redo/" "*.nix" "/nix/"] ../.;
-    cargoLock = {
-      lockFile = ../Cargo.lock;
-    };
-    cargoTestFlags = ["--lib" "--bins" "--examples"];
-
-    meta = with lib; {
-      description = "Port of apenwarr's redo to Rust";
-      homepage = "https://github.com/zombiezen/redo-rs";
-      license = licenses.asl20;
-      platforms = platforms.linux ++ platforms.darwin;
-    };
-  };
-in
-
 {
   inherit pkgs;
 
-  redo = redo { inherit (pkgs) lib rustPlatform nix-gitignore; };
+  redo-zombiezen = pkgs.callPackage ./redo-zombiezen.nix {};
 
   # Extra tools for running tests and the like.
   devTools = {

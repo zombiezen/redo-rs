@@ -17,5 +17,5 @@
 { project ? (import ./nix) {}
 }:
 {
-  inherit (project) redo;
+  inherit (project) redo-zombiezen;
 }

@@ -21,5 +21,5 @@ with project;
 
 pkgs.mkShell {
   packages = builtins.attrValues project.devTools;
-  inputsFrom = [ redo ];
+  inputsFrom = [ redo-zombiezen ];
 }

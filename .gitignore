@@ -22,3 +22,6 @@
 # Nix
 result
 result-*
+
+# Local GitHub actions
+bin/act

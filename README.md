@@ -8,6 +8,13 @@ debugging features.
 [Avery Pennarun's redo]: https://github.com/apenwarr/redo
 [Daniel J. Bernstein's redo build system]: http://cr.yp.to/redo.html
 
+## Security
+
+Known RustSec advisories:
+
+- [RUSTSEC-2020-0014](https://rustsec.org/advisories/RUSTSEC-2020-0014.html)
+- [RUSTSEC-2020-0071](https://rustsec.org/advisories/RUSTSEC-2020-0071.html)
+
 ## Installation
 
 1. Download the binary for your platform from the [latest release][].

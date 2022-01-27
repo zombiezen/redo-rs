@@ -7,6 +7,9 @@ repository = "https://github.com/zombiezen/redo-rs"
 license = "Apache-2.0"
 description = "Port of apenwarr's redo to Rust"
 
+[package.metadata]
+msrv = "1.54.0"
+
 [features]
 debug-jobserver = []
 

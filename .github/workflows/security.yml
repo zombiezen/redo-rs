@@ -9,7 +9,7 @@ jobs:
     name: Audit (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         os: [ubuntu-18.04, ubuntu-latest, macos-latest]
         rust: [stable, 1.54.0]

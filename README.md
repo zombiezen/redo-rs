@@ -21,6 +21,9 @@ If you use Visual Studio Code, you may be interested in installing the [redo ext
 
 ## Getting Started
 
+See the [`cookbook`](./cookbook) folder for the upstream documented [cookbook](https://redo.readthedocs.io/en/latest/cookbook/hello) examples.
+These examples are also used as a test catalogue/inventory in [tests/cookbooks.rs](./tests/cookbooks.rs)
+
 _Borrowed from https://redo.readthedocs.io/en/latest/cookbook/hello/_
 
 Create a source file:

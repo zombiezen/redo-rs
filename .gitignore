@@ -22,3 +22,8 @@
 # Nix
 result
 result-*
+
+# Cookbook artifiacts
+examples/hello/hello
+examples/hello/~
+examples/hello/.~

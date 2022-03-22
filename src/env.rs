@@ -78,7 +78,8 @@ pub struct Env {
     pub(crate) unlocked: bool,
     pub(crate) no_oob: bool,
 
-    redo_links_dir: Option<Rc<TempDir>>,
+    /// Holds the temporary symlink directory stored in the PATH, if needed.
+    _redo_links_dir: Option<Rc<TempDir>>,
 }
 
 impl Env {
@@ -178,7 +179,7 @@ impl Env {
         }
         Ok(Env {
             is_toplevel,
-            redo_links_dir,
+            _redo_links_dir: redo_links_dir,
             ..Env::inherit()?
         })
     }
@@ -260,7 +261,7 @@ impl Env {
             },
             unlocked: get_bool(ENV_UNLOCKED),
             no_oob: get_bool(ENV_NO_OOB),
-            redo_links_dir: None,
+            _redo_links_dir: None,
         };
         if v.depth.contains(|c| c != ' ') {
             return Err(RedoError::new(format!(

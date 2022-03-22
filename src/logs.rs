@@ -23,7 +23,6 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -64,7 +63,6 @@ impl<W: Write> Logger for RawLog<W> {
 #[derive(Debug)]
 struct PrettyLog<W> {
     file: W,
-    topdir: PathBuf,
     escapes: ColorEscapes,
     config: PrettyLogConfig,
 }
@@ -73,7 +71,6 @@ impl<W> PrettyLog<W> {
     fn new(file: W, escapes: ColorEscapes, config: PrettyLogConfig) -> PrettyLog<W> {
         PrettyLog {
             file,
-            topdir: env::current_dir().expect("getcwd failed"),
             escapes,
             config,
         }

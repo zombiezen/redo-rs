@@ -24,6 +24,8 @@
 
   # Extra tools for running tests and the like.
   devTools = {
-    inherit (pkgs) bash python310;
+    inherit (pkgs) bash python310 rust-analyzer;
+
+    rustLibSrc = pkgs.rust.packages.stable.rustPlatform.rustLibSrc;
   };
 }

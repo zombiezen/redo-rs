@@ -20,7 +20,15 @@ rustPlatform.buildRustPackage rec {
   pname = "redo-zombiezen";
   version = "0.2.2-alpha1";
 
-  src = nix-gitignore.gitignoreSource ["/t/" "/redo/" "*.nix" "/nix/"] ../.;
+  src = let
+    root = ../.;
+    patterns = nix-gitignore.withGitignoreFile extraIgnores root;
+    extraIgnores = ["/t/" "/redo/" "*.nix" "/nix/"];
+  in builtins.path {
+    name = "redo-zombiezen";
+    path = root;
+    filter = nix-gitignore.gitignoreFilterPure (_: _: true) patterns root;
+  };
   cargoLock = {
     lockFile = ../Cargo.lock;
   };

@@ -19,6 +19,7 @@ use anyhow::{anyhow, Error};
 use clap::{crate_version, App, Arg, ArgMatches};
 use nix::unistd::{self, Pid};
 use rusqlite::TransactionBehavior;
+use std::borrow::Cow;
 use std::cmp;
 use std::collections::{HashSet, VecDeque};
 use std::env;
@@ -313,7 +314,7 @@ impl LogState {
                         "do" | "waiting" | "locked" | "unlocked" => {
                             if auto_bool_arg(&matches, "debug-locks").unwrap_or(false) {
                                 logs::meta(g.kind(), &relname, Some(g.pid()));
-                                logs::write(line.trim_end());
+                                logs::write(&clean_line(&line));
                                 interrupted += 1;
                                 lines_written += 1;
                             } else if !self.already.contains(&fixname) {
@@ -354,7 +355,7 @@ impl LogState {
                             lines_written += 1;
                         }
                         _ => {
-                            logs::write(line.trim_end());
+                            logs::write(&clean_line(&line));
                             lines_written += 1;
                         }
                     }
@@ -367,7 +368,7 @@ impl LogState {
                             logs::set_depth(d);
                             interrupted = 0;
                         }
-                        logs::write(line.trim_end());
+                        logs::write(&clean_line(&line));
                         lines_written += 1;
                     }
                 }
@@ -405,6 +406,18 @@ fn tty_width() -> usize {
                 .and_then(|s| str::parse::<usize>(&s).ok())
         })
         .unwrap_or(70)
+}
+
+/// Remove any trailing whitespace from a string,
+/// but also ensure there is a trailing newline.
+fn clean_line(line: &str) -> Cow<str> {
+    if line.ends_with('\n') && !line[..line.len() - 1].ends_with(|c: char| c.is_whitespace()) {
+        return Cow::Borrowed(line);
+    }
+    let mut new_line = String::with_capacity(line.len() + 1);
+    new_line.push_str(line.trim_end());
+    new_line.push_str("\n");
+    Cow::Owned(new_line)
 }
 
 /// Format an integer with thousands separators.
@@ -474,5 +487,33 @@ mod tests {
     #[test]
     fn format_thousands_1234() {
         assert_eq!("1,234", &format_thousands(1234));
+    }
+
+    #[test]
+    fn clean_line_empty() {
+        assert_eq!("\n", &clean_line(""));
+    }
+
+    #[test]
+    fn clean_line_bare() {
+        assert_eq!("foo\n", &clean_line("foo"));
+    }
+
+    #[test]
+    fn clean_line_already_clean() {
+        let got = clean_line("foo\n");
+        assert_eq!("foo\n", &got);
+        assert!(
+            match &got {
+                Cow::Borrowed(_) => true,
+                Cow::Owned(_) => false,
+            },
+            "allocated instead of borrowing"
+        );
+    }
+
+    #[test]
+    fn clean_line_trailing_whitespace() {
+        assert_eq!("foo\n", &clean_line("foo \t \n"));
     }
 }

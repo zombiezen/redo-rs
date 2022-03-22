@@ -376,6 +376,7 @@ impl BuildJob<'_> {
                     s.push(' ');
                     s.push_str(&a.to_str().unwrap().replace("\n", " "));
                 }
+                s.push_str("\n");
                 logs::write(&s);
             }
             let argv = Vec::from_iter(

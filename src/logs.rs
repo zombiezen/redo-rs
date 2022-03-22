@@ -33,7 +33,8 @@ use super::env::{Env, OptionalBool};
 /// A line-based logger.
 trait Logger {
     /// Write a line to the logger.
-    /// `line` must not contain any `'\n'` characters.
+    /// `line` must contain a single `'\n'` character
+    /// and it must occur at the end of the string.
     fn write_line(&mut self, line: &str);
 }
 
@@ -51,16 +52,11 @@ impl<W: Write> RawLog<W> {
 
 impl<W: Write> Logger for RawLog<W> {
     fn write_line(&mut self, line: &str) {
-        debug_assert!(!line.contains('\n'));
-
-        // TODO(maybe): Prevent allocating on every write_line.
-        let mut msg_with_nl = String::with_capacity(line.len() + 1);
-        msg_with_nl.push_str(line);
-        msg_with_nl.push('\n');
+        debug_assert!(is_valid_log_line(line));
 
         let _ = io::stdout().flush();
         let _ = io::stderr().flush();
-        let _ = self.file.write(msg_with_nl.as_bytes());
+        let _ = self.file.write(line.as_bytes());
         let _ = self.file.flush();
     }
 }
@@ -102,9 +98,10 @@ impl<W> PrettyLog<W> {
 
 impl<W: Write> Logger for PrettyLog<W> {
     fn write_line(&mut self, line: &str) {
-        debug_assert!(!line.contains('\n'));
+        debug_assert!(is_valid_log_line(line));
 
-        let mut buf: Vec<u8> = Vec::with_capacity(line.len() + 1);
+        let mut buf: Vec<u8> = Vec::with_capacity(line.len());
+        let line = &line[..line.len() - 1]; // strip trailing newline
 
         let _ = io::stdout().flush();
         let _ = io::stderr().flush();
@@ -416,9 +413,10 @@ pub fn set_depth(depth: usize) {
 ///
 /// # Panics
 ///
-/// If `s` contains a `'\n'` character.
+/// If `line` does not contain exactly one `'\n'` character
+/// or if the `'\n'` character is not at the end of the string.
 pub fn write(line: &str) {
-    assert!(!line.contains('\n'));
+    assert!(is_valid_log_line(line));
     {
         let mut logger = GLOBAL_LOGGER
             .lock()
@@ -446,7 +444,12 @@ pub fn write(line: &str) {
 }
 
 /// Write a structured log-line to the process-wide logger.
+///
+/// # Panics
+///
+/// If `s` contains any `'\n'` characters.
 pub fn meta(kind: &str, s: &str, pid: Option<Pid>) {
+    assert!(!s.contains('\n'));
     let now = SystemTime::now();
     let timestamp = now
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -460,7 +463,7 @@ pub fn meta(kind: &str, s: &str, pid: Option<Pid>) {
         timestamp: timestamp.as_secs_f64(),
         text: s,
     };
-    write(&format!("{}", meta));
+    write(&format!("{}\n", meta));
 }
 
 /// An immutable reference to a structured log-line.
@@ -468,7 +471,9 @@ pub fn meta(kind: &str, s: &str, pid: Option<Pid>) {
 pub struct Meta<'a> {
     kind: &'a str,
     pid: pid_t,
+    /// Number of seconds since the Unix epoch.
     timestamp: f64,
+    /// Message. Will never contain newlines.
     text: &'a str,
 }
 
@@ -657,6 +662,13 @@ fn check_tty(tty: RawFd, color: OptionalBool) -> ColorEscapes {
     }
 }
 
+/// Reports whether the given string contains a single newline character
+/// at the end of the string.
+fn is_valid_log_line<S: AsRef<str>>(line: S) -> bool {
+    let line = line.as_ref();
+    line.ends_with('\n') && !line[..line.len() - 1].contains('\n')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,5 +681,25 @@ mod tests {
     #[test]
     fn parse_done_text_multiple_spaces() {
         assert_eq!(Meta::parse_done_text("1 foo bar"), Some((1, "foo bar")));
+    }
+
+    #[test]
+    fn empty_log_line_is_invalid() {
+        assert!(!is_valid_log_line(""));
+    }
+
+    #[test]
+    fn blank_log_line_is_valid() {
+        assert!(is_valid_log_line("\n"));
+    }
+
+    #[test]
+    fn normal_log_line_is_valid() {
+        assert!(is_valid_log_line("foo\n"));
+    }
+
+    #[test]
+    fn multiple_log_lines_is_invalid() {
+        assert!(!is_valid_log_line("foo\nbar\n"));
     }
 }

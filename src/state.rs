@@ -756,7 +756,7 @@ impl File {
             mode,
             &src.name
         );
-        assert_ne!(self.id, src.id);
+        assert_ne!(self.id, src.id, "{} cannot depend on itself", dep.as_ref().display());
         ptx.write(
             "insert or replace into Deps (target, mode, source, delete_me) values (?,?,?,?)",
             params!(self.id, mode, src.id, false),

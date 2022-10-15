@@ -26,7 +26,7 @@ use ouroboros::self_referencing;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{
     self, params, Connection, DropBehavior, OptionalExtension, Row, Rows, Statement, ToSql,
-    TransactionBehavior, NO_PARAMS,
+    TransactionBehavior, NO_PARAMS, Params,
 };
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -238,6 +238,7 @@ impl ProcessState {
     fn write<P>(&mut self, sql: &str, params: P) -> rusqlite::Result<usize>
     where
         P: IntoIterator,
+        P: Params,
         P::Item: ToSql,
     {
         self.wrote += 1;
@@ -287,6 +288,7 @@ impl<'a> ProcessTransaction<'a> {
 
     fn write<P>(&mut self, sql: &str, params: P) -> rusqlite::Result<usize>
     where
+        P: Params,
         P: IntoIterator,
         P::Item: ToSql,
     {

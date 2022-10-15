@@ -22,7 +22,7 @@ nix = "0.21.0"
 ouroboros = "0.10.0"
 rand = "0.8.4"
 rusqlite = { version = "0.28.0", features = ["bundled"] }
-sha-1 = "0.9.8"
+sha-1 = "0.10.*"
 tempfile = "3.2.0"
 term_size = "0.3.2"
 zombiezen-const-cstr = "1.0"

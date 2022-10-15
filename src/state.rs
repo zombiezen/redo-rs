@@ -255,6 +255,7 @@ impl<'a> ProcessTransaction<'a> {
             TransactionBehavior::Deferred => "BEGIN DEFERRED",
             TransactionBehavior::Immediate => "BEGIN IMMEDIATE",
             TransactionBehavior::Exclusive => "BEGIN EXCLUSIVE",
+            _ => todo!(),
         };
         state
             .db
@@ -319,6 +320,7 @@ impl<'a> ProcessTransaction<'a> {
                 Ok(state)
             }
             DropBehavior::Panic => panic!("ProcessTransaction dropped"),
+            _ => todo!(),
         }
     }
 }

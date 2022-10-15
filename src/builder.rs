@@ -577,8 +577,8 @@ impl BuildJob<'_> {
                 // Needed for makedir2 test. :(
                 match helpers::unlink(t) {
                     Ok(_)
-                    | Err(nix::Error::Sys(Errno::EISDIR))
-                    | Err(nix::Error::Sys(Errno::EPERM)) => {}
+                    | Err(Errno::EISDIR)
+                    | Err(Errno::EPERM) => {}
                     e @ Err(_) => e.expect("failed to remove target file"),
                 }
             }

@@ -1215,7 +1215,7 @@ impl Lock {
                 self.owned = true;
                 Ok(true)
             }
-            Err(nix::Error::Sys(Errno::EACCES)) | Err(nix::Error::Sys(Errno::EAGAIN)) => Ok(false),
+            Err(Errno::EACCES) | Err(Errno::EAGAIN) => Ok(false),
             Err(e) => Err(RedoError::opaque_error(e)),
         }
     }

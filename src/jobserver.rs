@@ -1084,7 +1084,7 @@ fn try_read(fd: RawFd, buf: &mut [u8]) -> nix::Result<Option<usize>> {
     helpers::set_interval_timer(IntervalTimer::Real, &INTERVAL_VALUE)?; // emergency fallback
     let result = match unistd::read(fd, buf) {
         Ok(n) => Ok(Some(n)),
-        Err(nix::Error::Sys(Errno::EINTR)) | Err(nix::Error::Sys(Errno::EAGAIN)) => Ok(None),
+        Err(Errno::EINTR) | Err(Errno::EAGAIN) => Ok(None),
         Err(e) => Err(e),
     };
     helpers::set_interval_timer(IntervalTimer::Real, &IntervalTimerValue::default())?;

@@ -563,7 +563,7 @@ pub(crate) fn fd_exists(fd: RawFd) -> bool {
 /// exist.
 pub(crate) fn unlink<P: ?Sized + NixPath>(f: &P) -> nix::Result<()> {
     match unistd::unlink(f) {
-        Err(nix::Error::Sys(Errno::ENOENT)) => Ok(()),
+        Err(Errno::ENOENT) => Ok(()),
         res => res,
     }
 }

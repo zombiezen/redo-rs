@@ -26,7 +26,7 @@ use ouroboros::self_referencing;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{
     self, params, Connection, DropBehavior, OptionalExtension, Row, Rows, Statement, ToSql,
-    TransactionBehavior, NO_PARAMS,
+    TransactionBehavior, NO_PARAMS, Params,
 };
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -238,6 +238,7 @@ impl ProcessState {
     fn write<P>(&mut self, sql: &str, params: P) -> rusqlite::Result<usize>
     where
         P: IntoIterator,
+        P: Params,
         P::Item: ToSql,
     {
         self.wrote += 1;
@@ -254,6 +255,7 @@ impl<'a> ProcessTransaction<'a> {
             TransactionBehavior::Deferred => "BEGIN DEFERRED",
             TransactionBehavior::Immediate => "BEGIN IMMEDIATE",
             TransactionBehavior::Exclusive => "BEGIN EXCLUSIVE",
+            _ => todo!(),
         };
         state
             .db
@@ -287,6 +289,7 @@ impl<'a> ProcessTransaction<'a> {
 
     fn write<P>(&mut self, sql: &str, params: P) -> rusqlite::Result<usize>
     where
+        P: Params,
         P: IntoIterator,
         P::Item: ToSql,
     {
@@ -317,6 +320,7 @@ impl<'a> ProcessTransaction<'a> {
                 Ok(state)
             }
             DropBehavior::Panic => panic!("ProcessTransaction dropped"),
+            _ => todo!(),
         }
     }
 }
@@ -1211,7 +1215,7 @@ impl Lock {
                 self.owned = true;
                 Ok(true)
             }
-            Err(nix::Error::Sys(Errno::EACCES)) | Err(nix::Error::Sys(Errno::EAGAIN)) => Ok(false),
+            Err(Errno::EACCES) | Err(Errno::EAGAIN) => Ok(false),
             Err(e) => Err(RedoError::opaque_error(e)),
         }
     }

@@ -21,16 +21,16 @@ rustPlatform.buildRustPackage rec {
   version = "0.2.2-alpha1";
 
   src = let
-    root = ../.;
+    root = ./.;
     patterns = nix-gitignore.withGitignoreFile extraIgnores root;
-    extraIgnores = ["/t/" "/redo/" "*.nix" "/nix/"];
+    extraIgnores = ["/t/" "/redo/" "*.nix"];
   in builtins.path {
     name = "redo-zombiezen";
     path = root;
     filter = nix-gitignore.gitignoreFilterPure (_: _: true) patterns root;
   };
   cargoLock = {
-    lockFile = ../Cargo.lock;
+    lockFile = ./Cargo.lock;
   };
   cargoTestFlags = ["--lib" "--bins" "--examples"];
 

@@ -25,8 +25,8 @@ use nix::unistd::{self, ForkResult};
 use ouroboros::self_referencing;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{
-    self, params, Connection, DropBehavior, OptionalExtension, Row, Rows, Statement, ToSql,
-    TransactionBehavior, NO_PARAMS, Params,
+    self, params, Connection, DropBehavior, OptionalExtension, Params, Row, Rows, Statement, ToSql,
+    TransactionBehavior,
 };
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -116,7 +116,7 @@ impl ProcessState {
                     .map_err(|e| RedoError::new(format!("could not connect: {}", e)))?;
                 let tx = db.transaction().map_err(RedoError::opaque_error)?;
                 let ver: Option<i32> = tx
-                    .query_row("select version from Schema", NO_PARAMS, |row| row.get(0))
+                    .query_row("select version from Schema", [], |row| row.get(0))
                     .optional()
                     .map_err(|e| RedoError::wrap(e, "schema version check failed"))?;
                 if ver != Some(SCHEMA_VER) {
@@ -136,13 +136,13 @@ impl ProcessState {
                 tx.execute(
                     "create table Schema \
                         (version int)",
-                    NO_PARAMS,
+                    [],
                 )
                 .map_err(|e| RedoError::wrap(e, "failed to create table Schema"))?;
                 tx.execute(
                     "create table Runid \
                         (id integer primary key autoincrement)",
-                    NO_PARAMS,
+                    [],
                 )
                 .map_err(|e| RedoError::wrap(e, "failed to create table Runid"))?;
                 tx.execute(
@@ -155,7 +155,7 @@ impl ProcessState {
                         failed_runid int, \
                         stamp,
                         csum)",
-                    NO_PARAMS,
+                    [],
                 )
                 .map_err(|e| RedoError::wrap(e, "failed to create table Files"))?;
                 tx.execute(
@@ -165,7 +165,7 @@ impl ProcessState {
                         mode not null, \
                         delete_me int, \
                         primary key (target, source))",
-                    NO_PARAMS,
+                    [],
                 )
                 .map_err(|e| RedoError::wrap(e, "failed to create table Deps"))?;
                 tx.execute(
@@ -177,7 +177,7 @@ impl ProcessState {
                 // Because of the cheesy way t/flush-cache is implemented, leave a
                 // lot of runids available before the "first" one so that we
                 // can adjust cached values to be before the first value.
-                tx.execute("insert into Runid values (1000000000)", NO_PARAMS)
+                tx.execute("insert into Runid values (1000000000)", [])
                     .map_err(|e| RedoError::wrap(e, "failed to insert initial Runid"))?;
                 tx.execute("insert into Files (name) values (?)", params![ALWAYS])
                     .map_err(|e| RedoError::wrap(e, "failed to insert ALWAYS file"))?;
@@ -188,11 +188,11 @@ impl ProcessState {
                 tx.execute(
                     "insert into Runid values \
                         ((select max(id)+1 from Runid))",
-                    NO_PARAMS,
+                    [],
                 )
                 .map_err(|e| RedoError::wrap(e, "failed to insert new Runid"))?;
                 e.fill_runid(
-                    tx.query_row("select last_insert_rowid()", NO_PARAMS, |row| row.get(0))
+                    tx.query_row("select last_insert_rowid()", [], |row| row.get(0))
                         .map_err(|e| RedoError::wrap(e, "failed to read runid"))?,
                 );
             }
@@ -337,7 +337,7 @@ impl<'a> Drop for ProcessTransaction<'a> {
 fn connect<P: AsRef<Path>>(env: &Env, dbfile: P) -> rusqlite::Result<Connection> {
     let db = Connection::open(dbfile)?;
     db.busy_timeout(Duration::from_secs(60))?;
-    db.execute("pragma synchronous = off", NO_PARAMS)?;
+    db.execute("pragma synchronous = off", [])?;
     // Some old/broken versions of pysqlite on MacOS work badly with journal
     // mode PERSIST.  But WAL fails on Windows WSL due to WSL's totally broken
     // locking.  On WSL, at least PERSIST works in single-threaded mode, so
@@ -348,7 +348,7 @@ fn connect<P: AsRef<Path>>(env: &Env, dbfile: P) -> rusqlite::Result<Connection>
         } else {
             "pragma journal_mode = WAL"
         },
-        NO_PARAMS,
+        [],
         |row| -> rusqlite::Result<String> { row.get(0) },
     )?;
     if env.locks_broken() {
@@ -760,7 +760,12 @@ impl File {
             mode,
             &src.name
         );
-        assert_ne!(self.id, src.id, "{} cannot depend on itself", dep.as_ref().display());
+        assert_ne!(
+            self.id,
+            src.id,
+            "{} cannot depend on itself",
+            dep.as_ref().display()
+        );
         ptx.write(
             "insert or replace into Deps (target, mode, source, delete_me) values (?,?,?,?)",
             params!(self.id, mode, src.id, false),
@@ -837,7 +842,7 @@ impl Files<'_> {
         };
         let state_result = FilesRowsTryBuilder {
             stmt,
-            rows_builder: |stmt| stmt.query(rusqlite::NO_PARAMS),
+            rows_builder: |stmt| stmt.query([]),
         }
         .try_build();
         match state_result {

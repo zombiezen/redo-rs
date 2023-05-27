@@ -30,6 +30,8 @@
       in {
         packages.default = pkgs.callPackage ./redo-zombiezen.nix {};
 
+        packages.rustLibSrc = pkgs.rust.packages.stable.rustPlatform.rustLibSrc;
+
         apps.default = {
           type = "app";
           program = "${self.packages.${system}.default}/bin/redo";
@@ -40,6 +42,7 @@
             pkgs.bash
             pkgs.python310
             pkgs.rust-analyzer
+            pkgs.rustfmt
             pkgs.rust.packages.stable.rustPlatform.rustLibSrc
           ];
           inputsFrom = [self.packages.${system}.default];

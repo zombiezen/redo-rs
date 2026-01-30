@@ -1130,6 +1130,27 @@ fn parse_makeflags<S: AsRef<OsStr>>(flags: S) -> Result<Option<(RawFd, RawFd)>, 
             let s = &flags[ofs + find.len()..];
             let arg = str::from_utf8(&s[..s.iter().copied().position(|b| b == b' ').unwrap()])
                 .map_err(|e| RedoError::wrap(e, "invalid MAKEFLAGS"))?;
+
+            // GNU Make 4.3+ named pipe jobserver format: fifo:/path/to/pipe
+            if let Some(fifo_path) = arg.strip_prefix("fifo:") {
+                use std::ffi::CString;
+                let c_path = CString::new(fifo_path)
+                    .map_err(|e| RedoError::wrap(e, format!("invalid fifo path: {}", fifo_path)))?;
+                // Open the named pipe for both reading and writing.
+                // O_RDWR avoids blocking that would occur with O_RDONLY.
+                let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR) };
+                if fd < 0 {
+                    return Err(RedoError::new(format!(
+                        "cannot open jobserver fifo {}: {}",
+                        fifo_path,
+                        std::io::Error::last_os_error()
+                    )));
+                }
+                // Use the same fd for both read and write
+                return Ok(Some((fd, fd)));
+            }
+
+            // Traditional pipe jobserver format: R,W (two file descriptors)
             let comma = match arg.find(',') {
                 Some(i) => i,
                 None => return Err(RedoError::new(format!("invalid --jobserver-auth: {}", arg))),

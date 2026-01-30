@@ -215,22 +215,42 @@ impl BuildJob<'_> {
             arg2
         };
         let cwd = env::current_dir().map_err(RedoError::opaque_error)?;
-        let mut argv: Vec<OsString> = vec![
-            OsString::from("sh"),
-            OsString::from("-e"),
-            df.do_file.clone(),
-            arg1,
-            arg2,
-            // $3 temp output file name
-            state::relpath(helpers::abs_path(&cwd, &tmp_name), &df.do_dir)
-                .map_err(RedoError::opaque_error)?
-                .into_os_string(),
-        ];
+
+        // On FreeBSD, use zsh in POSIX emulation mode because /bin/sh has
+        // some POSIX compliance issues (e.g., nested quotes in parameter
+        // expansion, cd -L behavior with symlinks).
+        #[cfg(target_os = "freebsd")]
+        let (shell_args, dash_e_index, shell_args_count): (&[&str], usize, usize) = (
+            &["/usr/local/bin/zsh", "--emulate", "sh", "-e"],
+            3,
+            4,
+        );
+        #[cfg(not(target_os = "freebsd"))]
+        let (shell_args, dash_e_index, shell_args_count): (&[&str], usize, usize) = (
+            &["sh", "-e"],
+            1,
+            2,
+        );
+
+        let mut argv: Vec<OsString> = shell_args
+            .iter()
+            .map(|s| OsString::from(*s))
+            .chain(std::iter::once(df.do_file.clone()))
+            .chain(std::iter::once(arg1))
+            .chain(std::iter::once(arg2))
+            .chain(std::iter::once(
+                // $3 temp output file name
+                state::relpath(helpers::abs_path(&cwd, &tmp_name), &df.do_dir)
+                    .map_err(RedoError::opaque_error)?
+                    .into_os_string(),
+            ))
+            .collect();
+
         if ptx.state().env().verbose != 0 {
-            argv[1].push("v");
+            argv[dash_e_index].push("v");
         }
         if ptx.state().env().xtrace != 0 {
-            argv[1].push("x");
+            argv[dash_e_index].push("x");
         }
         let firstline = {
             let f = File::open(df.do_dir.join(&df.do_file)).map_err(RedoError::opaque_error)?;
@@ -244,9 +264,9 @@ impl BuildJob<'_> {
         if firstline.starts_with("#!/") {
             let interpreter: Vec<&str> = firstline[2..].split(' ').collect();
             let mut new_argv: Vec<OsString> =
-                Vec::with_capacity(argv.len() - 2 + interpreter.len());
+                Vec::with_capacity(argv.len() - shell_args_count + interpreter.len());
             new_argv.extend(interpreter.into_iter().map(|s| OsString::from(s)));
-            new_argv.extend(argv.into_iter().skip(2));
+            new_argv.extend(argv.into_iter().skip(shell_args_count));
             argv = new_argv;
         }
         // make sure to create the logfile *before* writing the meta() about

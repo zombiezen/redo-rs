@@ -1277,6 +1277,8 @@ fn fid_flock(typ: c_short, fid: i64) -> Result<flock, TryFromIntError> {
         l_start: off_t::try_from(fid)?,
         l_len: 1,
         l_pid: 0,
+        #[cfg(target_os = "freebsd")]
+        l_sysid: 0,
     })
 }
 
